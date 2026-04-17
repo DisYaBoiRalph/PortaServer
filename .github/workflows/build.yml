@@ -89,11 +89,19 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease
 
+      - name: Rename APK
+        run: |
+          VERSION=$(grep 'versionName' app/build.gradle.kts | grep -o '"[^"]*"' | tr -d '"')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "APK_NAME=portaserver-${VERSION}-${SHORT_SHA}.apk" >> $GITHUB_ENV
+          mv app/build/outputs/apk/release/app-release.apk \
+             app/build/outputs/apk/release/portaserver-${VERSION}-${SHORT_SHA}.apk
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: portaserver-release
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/release/portaserver-*.apk
           retention-days: 30
 
       - name: Publish GitHub Release
@@ -102,5 +110,5 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
-          files: app/build/outputs/apk/release/app-release.apk
+          files: app/build/outputs/apk/release/portaserver-*.apk
           generate_release_notes: true
