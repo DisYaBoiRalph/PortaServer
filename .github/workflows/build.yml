@@ -43,6 +43,8 @@ jobs:
   # ── Release APK build ──────────────────────────────────────────────────────
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -93,3 +95,12 @@ jobs:
           name: portaserver-release
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: app/build/outputs/apk/release/app-release.apk
+          generate_release_notes: true
