@@ -93,6 +93,8 @@ jobs:
         run: |
           VERSION=$(grep 'versionName' app/build.gradle.kts | grep -o '"[^"]*"' | tr -d '"')
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
           echo "APK_NAME=portaserver-${VERSION}-${SHORT_SHA}.apk" >> $GITHUB_ENV
           mv app/build/outputs/apk/release/app-release.apk \
              app/build/outputs/apk/release/portaserver-${VERSION}-${SHORT_SHA}.apk
@@ -109,6 +111,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
+          name: v${{ env.VERSION }}-${{ env.SHORT_SHA }}
           files: app/build/outputs/apk/release/portaserver-*.apk
           generate_release_notes: true
