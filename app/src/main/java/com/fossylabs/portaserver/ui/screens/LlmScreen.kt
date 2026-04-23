@@ -1,6 +1,9 @@
 package com.fossylabs.portaserver.ui.screens
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -64,6 +67,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
@@ -99,6 +103,7 @@ fun LlmScreen(
 
     // Holds a pending (modelId, fileName) to resume after directory pick
     var pendingDownload by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var pendingDownloadForNotificationPermission by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     val dirPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -118,11 +123,33 @@ fun LlmScreen(
         }
     }
 
-    // Show snackbar with directory info when a download begins
-    LaunchedEffect(downloadStates) {
-        val starting = downloadStates.entries.firstOrNull { !it.value.done }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        val pending = pendingDownloadForNotificationPermission
+        pendingDownloadForNotificationPermission = null
+        if (pending != null) {
+            val (modelId, fileName) = pending
+            if (settings.downloadDirectory == null) {
+                pendingDownload = modelId to fileName
+                dirPickerLauncher.launch(null)
+            } else {
+                viewModel.downloadFile(modelId, fileName)
+            }
+        }
+    }
+
+    // Show snackbar once per download start instead of on every progress tick.
+    var snackbarShownFor by remember { mutableStateOf<String?>(null) }
+    val activeDownloadName = downloadStates.entries.firstOrNull { !it.value.done }?.key
+    LaunchedEffect(activeDownloadName, settings.downloadDirectory) {
         val currentDownloadDir = settings.downloadDirectory
-        if (starting != null && currentDownloadDir != null) {
+        if (activeDownloadName == null) {
+            snackbarShownFor = null
+            return@LaunchedEffect
+        }
+        if (currentDownloadDir != null && snackbarShownFor != activeDownloadName) {
+            snackbarShownFor = activeDownloadName
             val displayPath = safUriToDisplayPath(currentDownloadDir)
             val result = snackbarHostState.showSnackbar(
                 message = "Downloading to: $displayPath",
@@ -281,7 +308,11 @@ fun LlmScreen(
             if (inProgress.isNotEmpty()) {
                 items(inProgress) { entry ->
                     val (fileName, state) = entry
-                    DownloadingModelCard(fileName, state)
+                    DownloadingModelCard(
+                        fileName = fileName,
+                        state = state,
+                        onCancel = { viewModel.cancelDownload(fileName) },
+                    )
                 }
             }
 
@@ -388,13 +419,23 @@ fun LlmScreen(
             onPickDirectory = { dirPickerLauncher.launch(null) },
             onDownload = { fileName ->
                 val modelId = selectedHfModel!!.name
-                if (settings.downloadDirectory == null) {
+                val needsNotificationPermission =
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        ) != PackageManager.PERMISSION_GRANTED
+                if (needsNotificationPermission) {
+                    pendingDownloadForNotificationPermission = modelId to fileName
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else if (settings.downloadDirectory == null) {
                     pendingDownload = modelId to fileName
                     dirPickerLauncher.launch(null)
                 } else {
                     viewModel.downloadFile(modelId, fileName)
                 }
             },
+            onCancelDownload = viewModel::cancelDownload,
             onAddDirectory = { dirPickerLauncher.launch(null) },
             onLoad = { fileUri -> viewModel.loadModel(fileUri) },
             onUnload = viewModel::unloadModel,
@@ -484,7 +525,11 @@ private fun ModelCard(
 }
 
 @Composable
-private fun DownloadingModelCard(fileName: String, state: DownloadState) {
+private fun DownloadingModelCard(
+    fileName: String,
+    state: DownloadState,
+    onCancel: () -> Unit,
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -493,7 +538,7 @@ private fun DownloadingModelCard(fileName: String, state: DownloadState) {
                     Text("Downloading…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                 }
                 Spacer(Modifier.width(8.dp))
-                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                OutlinedButton(onClick = onCancel) { Text("Stop") }
             }
             Spacer(Modifier.height(8.dp))
             LinearProgressIndicator(progress = { state.progress }, modifier = Modifier.fillMaxWidth())
@@ -624,6 +669,7 @@ private fun ModelDetailSheet(
     onDismiss: () -> Unit,
     onPickDirectory: () -> Unit,
     onDownload: (fileName: String) -> Unit,
+    onCancelDownload: (fileName: String) -> Unit,
     onAddDirectory: () -> Unit,
     onLoad: (fileUri: String) -> Unit,
     onUnload: () -> Unit,
@@ -755,6 +801,7 @@ private fun ModelDetailSheet(
                             isLoaded = state?.fileUri != null && state.fileUri == loadedModelPath,
                             isLoadingModel = isLoadingModel,
                             onDownload = { onDownload(file.rfilename) },
+                            onCancel = { onCancelDownload(file.rfilename) },
                             onLoad = { fileUri -> onLoad(fileUri) },
                             onUnload = onUnload,
                         )
@@ -772,6 +819,7 @@ private fun FileDownloadRow(
     isLoaded: Boolean,
     isLoadingModel: Boolean,
     onDownload: () -> Unit,
+    onCancel: () -> Unit,
     onLoad: (fileUri: String) -> Unit,
     onUnload: () -> Unit,
 ) {
@@ -823,11 +871,7 @@ private fun FileDownloadRow(
                     )
                 }
                 downloadState != null -> {
-                    CircularProgressIndicator(
-                        progress = { downloadState.progress },
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp,
-                    )
+                    OutlinedButton(onClick = onCancel) { Text("Stop") }
                 }
                 else -> {
                     IconButton(onClick = onDownload) {

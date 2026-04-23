@@ -1,10 +1,14 @@
 package com.fossylabs.portaserver.notification
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 object DownloadNotifier {
     private const val CHANNEL_ID = "portaserver_downloads"
@@ -23,6 +27,16 @@ object DownloadNotifier {
         }
     }
 
+    private fun notificationsAllowed(context: Context, mgr: NotificationManager): Boolean {
+        val runtimePermissionOk =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+        return runtimePermissionOk && mgr.areNotificationsEnabled()
+    }
+
     fun update(
         context: Context,
         id: Int,
@@ -34,7 +48,7 @@ object DownloadNotifier {
         ensureChannel(context)
 
         val mgr = context.getSystemService(NotificationManager::class.java)
-        val notificationsEnabled = mgr.areNotificationsEnabled()
+        val notificationsEnabled = notificationsAllowed(context, mgr)
 
         val pct = if (totalBytes != null && totalBytes > 0L) {
             ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
@@ -85,7 +99,7 @@ object DownloadNotifier {
     fun complete(context: Context, id: Int, title: String, fileUri: String) {
         ensureChannel(context)
         val mgr = context.getSystemService(NotificationManager::class.java)
-        if (!mgr.areNotificationsEnabled()) {
+        if (!notificationsAllowed(context, mgr)) {
             // ensure the user saw a toast at least once
             synchronized(toastShown) { if (!toastShown.contains(id)) {
                 Toast.makeText(context, "Downloaded: $title", Toast.LENGTH_SHORT).show()

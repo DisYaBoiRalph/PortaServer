@@ -104,7 +104,10 @@ class ModelRepository(
     suspend fun fetchModelFiles(modelId: String): List<HuggingFaceFileDto> {
         return try {
             val detail: HuggingFaceModelDetailDto = httpClient
-                .get("https://huggingface.co/api/models/$modelId")
+                .get("https://huggingface.co/api/models/$modelId") {
+                    // Include blob metadata so sibling GGUF entries expose size/lfs before download.
+                    parameter("blobs", true)
+                }
                 .body()
             detail.siblings.filter { it.rfilename.endsWith(".gguf", ignoreCase = true) }
         } catch (_: Exception) {

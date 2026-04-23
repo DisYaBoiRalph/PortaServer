@@ -26,10 +26,13 @@ import io.ktor.client.statement.bodyAsChannel
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -39,6 +42,10 @@ import android.util.Log
 import kotlinx.serialization.json.Json
 import com.fossylabs.portaserver.notification.DownloadNotifier
 import java.io.File
+import java.io.RandomAccessFile
+import java.io.FileInputStream
+import java.util.concurrent.atomic.AtomicLong
+import io.ktor.client.request.get
 
 /** Per-file download state: progress 0f–1f while downloading, 1f when done. */
 data class DownloadState(
@@ -51,6 +58,14 @@ data class DownloadState(
 )
 
 class LlmViewModel(application: Application) : AndroidViewModel(application) {
+
+    // Buffer size for I/O operations (bytes).
+    private val IO_BUFFER_SIZE = 8192
+    private val UI_PROGRESS_UPDATE_INTERVAL_MS = 250L
+    private val NOTIFICATION_UPDATE_INTERVAL_MS = 750L
+    private val PARALLEL_MIN_FILE_SIZE_BYTES = 2_000_000L
+    private val MAX_PARALLEL_RANGES = 4
+    private val MIN_FREE_HEAP_FOR_PARALLEL_BYTES = 96L * 1024L * 1024L
 
     private val settingsRepo = SettingsRepository(application.settingsDataStore)
     private val deviceSpecsReader = DeviceSpecsReader(application)
@@ -66,7 +81,12 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     val loadedModel: StateFlow<ModelInfo?> = LlmInferenceEngine.loadedModel
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val isLoadingModel: StateFlow<Boolean> = LlmInferenceEngine.isLoading
+    private val _isPreparingModelLoad = MutableStateFlow(false)
+
+    val isLoadingModel: StateFlow<Boolean> = combine(
+        LlmInferenceEngine.isLoading,
+        _isPreparingModelLoad,
+    ) { engineLoading, preparing -> engineLoading || preparing }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _deviceSpecs = MutableStateFlow<DeviceSpecs?>(null)
@@ -104,6 +124,8 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     /** fileName → download state (progress, done). */
     private val _downloadStates = MutableStateFlow<Map<String, DownloadState>>(emptyMap())
     val downloadStates: StateFlow<Map<String, DownloadState>> = _downloadStates.asStateFlow()
+    private val downloadJobs = mutableMapOf<String, Job>()
+    private val downloadJobsLock = Any()
 
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -224,6 +246,11 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadFile(modelId: String, fileName: String) {
+        synchronized(downloadJobsLock) {
+            val existing = downloadJobs[fileName]
+            if (existing != null && existing.isActive) return
+        }
+
         val downloadDirUri = settings.value.downloadDirectory ?: return
         val fileInfo = _hfModelFiles.value.firstOrNull { it.rfilename == fileName }
         val expectedSha256 = fileInfo?.lfs?.sha256
@@ -231,8 +258,9 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         val url = "https://huggingface.co/$modelId/resolve/main/$fileName"
         val resolver = getApplication<Application>().contentResolver
 
-        viewModelScope.launch(Dispatchers.IO) {
+        val job = viewModelScope.launch(Dispatchers.IO) {
             _downloadStates.update { it + (fileName to DownloadState(0f)) }
+            var createdFileUri: Uri? = null
             try {
                 val treeUri = Uri.parse(downloadDirUri)
                 val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
@@ -260,6 +288,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 val fileUri = DocumentsContract.createDocument(
                     resolver, parentDocUri, "application/octet-stream", fileName
                 ) ?: error("Cannot create file in download directory")
+                createdFileUri = fileUri
 
                 val digest = expectedSha256?.let { java.security.MessageDigest.getInstance("SHA-256") }
 
@@ -267,47 +296,193 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 val notifId = fileName.hashCode()
                 DownloadNotifier.ensureChannel(getApplication())
                 val startMs = System.currentTimeMillis()
-                httpClient.prepareGet(url).execute { response ->
-                    val contentLength = response.headers["Content-Length"]?.toLongOrNull()
-                    val channel = response.bodyAsChannel()
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
 
-                    resolver.openOutputStream(fileUri)?.use { os ->
-                        while (!channel.isClosedForRead) {
-                            val read = channel.readAvailable(buffer)
-                            if (read > 0) {
-                                os.write(buffer, 0, read)
-                                digest?.update(buffer, 0, read)
-                                totalDownloaded += read
+                // Try to get metadata (HEAD) to decide on parallel ranged download
+                var contentLength: Long? = null
+                var acceptRanges: String? = null
+                try {
+                    httpClient.prepareGet(url).execute { resp ->
+                        contentLength = resp.headers["Content-Length"]?.toLongOrNull()
+                        acceptRanges = resp.headers["Accept-Ranges"]?.lowercase()
+                    }
+                } catch (_: Exception) {
+                    // ignore and fall back to GET
+                }
 
-                                val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                                val speed = (totalDownloaded * 1000L) / elapsed
+                val progressLock = Any()
+                var lastUiUpdateAt = 0L
+                var lastNotifUpdateAt = 0L
 
-                                val progress = if (contentLength != null && contentLength > 0L)
-                                    (totalDownloaded.toFloat() / contentLength).coerceIn(0f, 1f)
-                                else 0f
+                fun publishProgress(downloadedBytes: Long, totalBytes: Long?, force: Boolean = false) {
+                    val now = System.currentTimeMillis()
+                    val elapsed = (now - startMs).coerceAtLeast(1L)
+                    val speed = (downloadedBytes * 1000L) / elapsed
+                    val progress = if (totalBytes != null && totalBytes > 0L) {
+                        (downloadedBytes.toFloat() / totalBytes).coerceIn(0f, 1f)
+                    } else 0f
 
-                                _downloadStates.update {
-                                    it + (fileName to DownloadState(
-                                        progress,
-                                        done = false,
-                                        fileUri = null,
-                                        downloadedBytes = totalDownloaded,
-                                        totalBytes = contentLength,
-                                        speedBytesPerSec = speed,
-                                    ))
-                                }
-
-                                // Update notification
-                                try {
-                                    DownloadNotifier.update(
-                                        getApplication(), notifId, fileName,
-                                        totalDownloaded, contentLength, speed
-                                    )
-                                } catch (_: Exception) {}
-                            }
+                    var doUiUpdate = false
+                    var doNotifUpdate = false
+                    synchronized(progressLock) {
+                        if (force || now - lastUiUpdateAt >= UI_PROGRESS_UPDATE_INTERVAL_MS) {
+                            lastUiUpdateAt = now
+                            doUiUpdate = true
+                        }
+                        if (force || now - lastNotifUpdateAt >= NOTIFICATION_UPDATE_INTERVAL_MS) {
+                            lastNotifUpdateAt = now
+                            doNotifUpdate = true
                         }
                     }
+
+                    if (doUiUpdate) {
+                        _downloadStates.update {
+                            it + (fileName to DownloadState(
+                                progress,
+                                done = false,
+                                fileUri = null,
+                                downloadedBytes = downloadedBytes,
+                                totalBytes = totalBytes,
+                                speedBytesPerSec = speed,
+                            ))
+                        }
+                    }
+
+                    if (doNotifUpdate) {
+                        try {
+                            DownloadNotifier.update(
+                                getApplication(), notifId, fileName,
+                                downloadedBytes, totalBytes, speed,
+                            )
+                        } catch (_: Exception) {}
+                    }
+                }
+
+                // Local helper: sequential download (used as fallback)
+                suspend fun doSequentialDownload() {
+                    totalDownloaded = 0L
+                    httpClient.prepareGet(url).execute { response ->
+                        val cl = response.headers["Content-Length"]?.toLongOrNull()
+                        val channel = response.bodyAsChannel()
+                        val buffer = ByteArray(IO_BUFFER_SIZE)
+
+                        val output = resolver.openOutputStream(fileUri)
+                            ?: error("Cannot open output stream for download target")
+                        output.use { os ->
+                            while (!channel.isClosedForRead) {
+                                val read = channel.readAvailable(buffer)
+                                if (read > 0) {
+                                    os.write(buffer, 0, read)
+                                    digest?.update(buffer, 0, read)
+                                    totalDownloaded += read
+                                    publishProgress(totalDownloaded, cl)
+                                }
+                            }
+                        }
+                        publishProgress(totalDownloaded, cl, force = true)
+                    }
+                }
+
+                val _cnt = contentLength
+                val runtime = Runtime.getRuntime()
+                val freeHeapBytes = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+                val canUseParallel = _cnt != null && acceptRanges == "bytes" && _cnt > PARALLEL_MIN_FILE_SIZE_BYTES &&
+                    freeHeapBytes >= MIN_FREE_HEAP_FOR_PARALLEL_BYTES
+
+                if (canUseParallel) {
+                    val totalLen = _cnt!!
+                    // Parallel ranged download into a temp file in app cache, then copy to SAF
+                    val tempFile = File(getApplication<Application>().cacheDir, "$fileName.part")
+                    try {
+                        RandomAccessFile(tempFile, "rw").use { raf -> raf.setLength(totalLen) }
+
+                        val maxParallelByHeap = when {
+                            freeHeapBytes >= 192L * 1024L * 1024L -> MAX_PARALLEL_RANGES
+                            freeHeapBytes >= 144L * 1024L * 1024L -> 3
+                            else -> 2
+                        }
+                        val concurrency = minOf(maxParallelByHeap, ((totalLen / PARALLEL_MIN_FILE_SIZE_BYTES).toInt()).coerceAtLeast(1))
+                        val chunkSize = (totalLen + concurrency - 1L) / concurrency.toLong()
+                        Log.i("LlmViewModel", "Parallel download enabled: concurrency=$concurrency, freeHeapBytes=$freeHeapBytes")
+
+                        val totalAtomic = AtomicLong(0L)
+                        var parallelCompleted = false
+
+                        val ranges = mutableListOf<Pair<Long, Long>>()
+                        var pos = 0L
+                        while (pos < totalLen) {
+                            val end = minOf(pos + chunkSize - 1, totalLen - 1)
+                            ranges.add(pos to end)
+                            pos = end + 1
+                        }
+
+                        try {
+                            // Download ranges in parallel and write directly into the temp file
+                            kotlinx.coroutines.coroutineScope {
+                                val jobs = ranges.map { (start, end) ->
+                                    launch(Dispatchers.IO) {
+                                        val resp = httpClient.get(url) { headers.append("Range", "bytes=$start-$end") }
+                                        if (resp.status.value != 206) {
+                                            error("Server did not return partial content for range request")
+                                        }
+                                        val ch = resp.bodyAsChannel()
+                                        val buf = ByteArray(IO_BUFFER_SIZE)
+                                        RandomAccessFile(tempFile, "rw").use { rafChunk ->
+                                            rafChunk.seek(start)
+                                            while (!ch.isClosedForRead) {
+                                                val r = ch.readAvailable(buf)
+                                                if (r <= 0) break
+                                                rafChunk.write(buf, 0, r)
+                                                val tot = totalAtomic.addAndGet(r.toLong())
+                                                publishProgress(tot, totalLen)
+                                            }
+                                        }
+                                    }
+                                }
+                                jobs.forEach { it.join() }
+                            }
+
+                            totalDownloaded = totalAtomic.get()
+                            publishProgress(totalDownloaded, totalLen, force = true)
+                            parallelCompleted = true
+                        } catch (oom: OutOfMemoryError) {
+                            Log.e("LlmViewModel", "OOM during parallel download; falling back to sequential: ${oom.message}")
+                            doSequentialDownload()
+                        } catch (e: Exception) {
+                            Log.w("LlmViewModel", "Parallel range download failed, falling back to sequential: ${e.message}")
+                            doSequentialDownload()
+                        }
+
+                        if (parallelCompleted) {
+                            // Compute SHA256 from temp file if required
+                            if (digest != null) {
+                                FileInputStream(tempFile).use { fis ->
+                                    val buf = ByteArray(IO_BUFFER_SIZE)
+                                    var r: Int
+                                    while (fis.read(buf).also { r = it } != -1) digest.update(buf, 0, r)
+                                }
+                            }
+
+                            // Copy temp file to SAF target
+                            FileInputStream(tempFile).use { fis ->
+                                val output = resolver.openOutputStream(fileUri)
+                                    ?: error("Cannot open output stream for download target")
+                                output.use { os ->
+                                    fis.copyTo(os, IO_BUFFER_SIZE)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        try { DownloadNotifier.cancel(getApplication(), notifId) } catch (_: Exception) {}
+                        throw e
+                    } finally {
+                        if (tempFile.exists()) tempFile.delete()
+                    }
+                } else {
+                    if (_cnt != null && acceptRanges == "bytes" && _cnt > PARALLEL_MIN_FILE_SIZE_BYTES) {
+                        Log.i("LlmViewModel", "Skipping parallel download due to low free heap: $freeHeapBytes bytes")
+                    }
+                    // Sequential fallback (single stream)
+                    doSequentialDownload()
                 }
 
                 // ── Verify SHA256 if available ─────────────────────────────
@@ -332,12 +507,39 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 try { DownloadNotifier.complete(getApplication(), fileName.hashCode(), fileName, fileUri.toString()) } catch (_: Exception) {}
                 settingsRepo.saveFileMeta(fileUri.toString(), totalDownloaded, verifiedSha256 ?: expectedSha256)
                 refreshLocalModels()
+            } catch (_: CancellationException) {
+                createdFileUri?.let { uri ->
+                    try { DocumentsContract.deleteDocument(resolver, uri) } catch (_: Exception) {}
+                }
+                _downloadStates.update { it - fileName }
+                try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
             } catch (e: Exception) {
                 _downloadStates.update { it - fileName }
                 try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
+                createdFileUri?.let { uri ->
+                    try { DocumentsContract.deleteDocument(resolver, uri) } catch (_: Exception) {}
+                }
                 _errorMessage.value = "Download failed: ${e.message}"
             }
         }
+
+        synchronized(downloadJobsLock) { downloadJobs[fileName] = job }
+        job.invokeOnCompletion {
+            synchronized(downloadJobsLock) {
+                if (downloadJobs[fileName] === job) {
+                    downloadJobs.remove(fileName)
+                }
+            }
+        }
+    }
+
+    fun cancelDownload(fileName: String) {
+        val job = synchronized(downloadJobsLock) { downloadJobs.remove(fileName) }
+        if (job != null) {
+            job.cancel(CancellationException("Cancelled by user"))
+        }
+        _downloadStates.update { it - fileName }
+        try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
     }
 
     fun deleteLocalModel(path: String) {
@@ -390,6 +592,8 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     private fun getLocalIpAddress(): String? = ServerForegroundService.getLocalIpAddress()
 
     fun loadModel(path: String) {
+        if (isLoadingModel.value) return
+        _isPreparingModelLoad.value = true
         viewModelScope.launch {
             try {
                 if (path.startsWith("content://")) {
@@ -434,6 +638,8 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 _errorMessage.value = null
             } catch (e: Exception) {
                 _errorMessage.value = "Failed to load model: ${e.message}"
+            } finally {
+                _isPreparingModelLoad.value = false
             }
         }
     }
