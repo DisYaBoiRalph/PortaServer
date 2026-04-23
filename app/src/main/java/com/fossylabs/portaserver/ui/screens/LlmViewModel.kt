@@ -35,10 +35,20 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.util.Log
 import kotlinx.serialization.json.Json
+import com.fossylabs.portaserver.notification.DownloadNotifier
+import java.io.File
 
 /** Per-file download state: progress 0f–1f while downloading, 1f when done. */
-data class DownloadState(val progress: Float, val done: Boolean = false, val fileUri: String? = null)
+data class DownloadState(
+    val progress: Float,
+    val done: Boolean = false,
+    val fileUri: String? = null,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long? = null,
+    val speedBytesPerSec: Long? = null,
+)
 
 class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -121,13 +131,17 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
             val storedSettings = settingsRepo.settings.first()
             val dirs = storedSettings.scanDirectories
             val metadata = storedSettings.fileMetadata
+            val hfMetadata = storedSettings.hfFileMetadata
             val tier = _modelTier.value
             // Scan + size check (metadata-only query — fast)
             val scanned = withContext(Dispatchers.IO) {
                 modelRepository.scanLocalModels(dirs)
                     .map { model ->
-                        val meta = metadata[model.path]
-                        val sizeOk = if (meta != null) {
+                        // Prefer local metadata (saved at download), fallback to HF-provided metadata by filename
+                        val localMeta = metadata[model.path]
+                        val remoteMeta = hfMetadata.entries.firstOrNull { it.key.substringAfterLast("/") == model.name }?.value
+                        val meta = localMeta ?: remoteMeta
+                        val sizeOk = if (meta != null && meta.expectedSize > 0L) {
                             getDocumentSize(Uri.parse(model.path)) == meta.expectedSize
                         } else true
                         model.copy(
@@ -138,14 +152,17 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     .sortedByDescending { it.isRecommended }
             }
             _localModels.value = scanned
-            // Background SHA256 check for files that passed size check
-            if (metadata.any { it.value.sha256 != null }) {
+            // Background SHA256 check for files that passed size check; consider both local and HF metadata
+            val hasAnySha = metadata.any { it.value.sha256 != null } || hfMetadata.any { it.value.sha256 != null }
+            if (hasAnySha) {
                 viewModelScope.launch(Dispatchers.IO) {
                     val updated = scanned.map { model ->
                         if (model.isCorrupted) return@map model
-                        val sha256 = metadata[model.path]?.sha256 ?: return@map model
+                        val localSha = metadata[model.path]?.sha256
+                        val remoteSha = hfMetadata.entries.firstOrNull { it.key.substringAfterLast("/") == model.name }?.value?.sha256
+                        val candidateSha = localSha ?: remoteSha ?: return@map model
                         val actual = computeSha256(Uri.parse(model.path))
-                        if (actual != sha256) model.copy(isCorrupted = true) else model
+                        if (actual != candidateSha) model.copy(isCorrupted = true) else model
                     }
                     _localModels.value = updated
                 }
@@ -174,6 +191,14 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 _isFetchingFiles.value = true
                 val files = modelRepository.fetchModelFiles(model.name)
                 _hfModelFiles.value = files
+                // Persist HF-provided metadata so we can validate local files later
+                for (file in files) {
+                    try {
+                        val size = file.lfs?.size ?: file.size
+                        settingsRepo.saveRemoteFileMeta(model.name, file.rfilename, size, file.lfs?.sha256)
+                    } catch (_: Exception) {
+                    }
+                }
                 _isFetchingFiles.value = false
                 // Pre-populate downloadStates from already-present local models
                 val currentLocals = _localModels.value
@@ -239,6 +264,9 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 val digest = expectedSha256?.let { java.security.MessageDigest.getInstance("SHA-256") }
 
                 var totalDownloaded = 0L
+                val notifId = fileName.hashCode()
+                DownloadNotifier.ensureChannel(getApplication())
+                val startMs = System.currentTimeMillis()
                 httpClient.prepareGet(url).execute { response ->
                     val contentLength = response.headers["Content-Length"]?.toLongOrNull()
                     val channel = response.bodyAsChannel()
@@ -251,11 +279,32 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                                 os.write(buffer, 0, read)
                                 digest?.update(buffer, 0, read)
                                 totalDownloaded += read
-                                if (contentLength != null && contentLength > 0) {
-                                    _downloadStates.update {
-                                        it + (fileName to DownloadState(totalDownloaded.toFloat() / contentLength))
-                                    }
+
+                                val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                                val speed = (totalDownloaded * 1000L) / elapsed
+
+                                val progress = if (contentLength != null && contentLength > 0L)
+                                    (totalDownloaded.toFloat() / contentLength).coerceIn(0f, 1f)
+                                else 0f
+
+                                _downloadStates.update {
+                                    it + (fileName to DownloadState(
+                                        progress,
+                                        done = false,
+                                        fileUri = null,
+                                        downloadedBytes = totalDownloaded,
+                                        totalBytes = contentLength,
+                                        speedBytesPerSec = speed,
+                                    ))
                                 }
+
+                                // Update notification
+                                try {
+                                    DownloadNotifier.update(
+                                        getApplication(), notifId, fileName,
+                                        totalDownloaded, contentLength, speed
+                                    )
+                                } catch (_: Exception) {}
                             }
                         }
                     }
@@ -268,17 +317,24 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     if (actualSha256 != expectedSha256) {
                         DocumentsContract.deleteDocument(resolver, fileUri)
                         _downloadStates.update { it - fileName }
+                        try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
                         _errorMessage.value = "Integrity check failed for $fileName"
                         return@launch
                     }
                     verifiedSha256 = actualSha256
                 }
-
-                _downloadStates.update { it + (fileName to DownloadState(1f, done = true, fileUri = fileUri.toString())) }
+                _downloadStates.update {
+                    it + (fileName to DownloadState(
+                        1f, done = true, fileUri = fileUri.toString(),
+                        downloadedBytes = totalDownloaded, totalBytes = expectedSize, speedBytesPerSec = null
+                    ))
+                }
+                try { DownloadNotifier.complete(getApplication(), fileName.hashCode(), fileName, fileUri.toString()) } catch (_: Exception) {}
                 settingsRepo.saveFileMeta(fileUri.toString(), totalDownloaded, verifiedSha256 ?: expectedSha256)
                 refreshLocalModels()
             } catch (e: Exception) {
                 _downloadStates.update { it - fileName }
+                try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
                 _errorMessage.value = "Download failed: ${e.message}"
             }
         }
@@ -337,14 +393,39 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 if (path.startsWith("content://")) {
-                    // SAF content URI — resolve to /proc/self/fd/<n> for NDK access.
-                    // Keep the PFD open during loading so the fd remains valid.
+                    // SAF content URI — first try /proc/self/fd/<n> for NDK access.
+                    // If that fails on some Android versions/providers, fall back
+                    // to copying the content to a cache file and loading from there.
                     withContext(Dispatchers.IO) {
-                        val pfd = getApplication<Application>().contentResolver
-                            .openFileDescriptor(android.net.Uri.parse(path), "r")
-                            ?: error("Cannot open model file: $path")
-                        pfd.use {
-                            LlmInferenceEngine.loadModel("/proc/self/fd/${it.fd}")
+                        val resolver = getApplication<Application>().contentResolver
+                        val uri = android.net.Uri.parse(path)
+
+                        // Fast path: open PFD and pass fd path to native loader.
+                        var fastPathOk = false
+                        try {
+                            val pfd = resolver.openFileDescriptor(uri, "r")
+                                ?: error("Cannot open model file: $path")
+                            pfd.use {
+                                Log.i("LlmViewModel", "Loading model via PFD: /proc/self/fd/${it.fd}")
+                                LlmInferenceEngine.loadModel("/proc/self/fd/${it.fd}")
+                            }
+                            fastPathOk = true
+                        } catch (e: Exception) {
+                            Log.i("LlmViewModel", "PFD fast path failed, will copy to cache: ${e.message}")
+                        }
+
+                        if (!fastPathOk) {
+                            // Fallback: copy the document into a cache file and load from it.
+                            val cacheFile = File(getApplication<Application>().cacheDir,
+                                "model-${System.currentTimeMillis()}.bin")
+                            resolver.openInputStream(uri)?.use { input ->
+                                Log.i("LlmViewModel", "Copying SAF content to cache file: ${cacheFile.absolutePath}")
+                                cacheFile.outputStream().use { output ->
+                                    input.copyTo(output)
+                                }
+                            } ?: error("Cannot open model input stream: $path")
+
+                            LlmInferenceEngine.loadModel(cacheFile.absolutePath)
                         }
                     }
                 } else {

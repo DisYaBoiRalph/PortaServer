@@ -24,6 +24,7 @@ data class SettingsState(
     val scanDirectories: Set<String> = emptySet(),
     val downloadDirectory: String? = null,
     val fileMetadata: Map<String, FileMeta> = emptyMap(),
+    val hfFileMetadata: Map<String, FileMeta> = emptyMap(),
 )
 
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
@@ -36,6 +37,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val KEY_SCAN_DIRS = stringSetPreferencesKey("scan_directories")
         val KEY_DOWNLOAD_DIR = stringPreferencesKey("download_directory")
         val KEY_FILE_METADATA = stringSetPreferencesKey("file_metadata")
+        val KEY_HF_FILE_METADATA = stringSetPreferencesKey("hf_file_metadata")
         const val TIMEOUT_DISABLED = -1
     }
 
@@ -54,6 +56,15 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
                 val size = parts.getOrNull(1)?.toLongOrNull() ?: 0L
                 val sha256 = parts.getOrNull(2)?.takeIf { it.isNotEmpty() }
                 uri to FileMeta(size, sha256)
+            },
+            hfFileMetadata = (prefs[KEY_HF_FILE_METADATA] ?: emptySet()).associate { entry ->
+                val parts = entry.split('\t', limit = 4)
+                val modelId = parts.getOrNull(0) ?: ""
+                val filename = parts.getOrNull(1) ?: ""
+                val key = "hf://$modelId/$filename"
+                val size = parts.getOrNull(2)?.toLongOrNull() ?: 0L
+                val sha256 = parts.getOrNull(3)?.takeIf { it.isNotEmpty() }
+                key to FileMeta(size, sha256)
             },
         )
     }
@@ -97,6 +108,16 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             val entry = "$fileUri\t$expectedSize\t${sha256 ?: ""}"
             val current = prefs[KEY_FILE_METADATA] ?: emptySet()
             prefs[KEY_FILE_METADATA] = current.filter { !it.startsWith("$fileUri\t") }.toSet() + entry
+        }
+    }
+
+    suspend fun saveRemoteFileMeta(modelId: String, fileName: String, expectedSize: Long?, sha256: String?) {
+        dataStore.edit { prefs ->
+            val sizeVal = expectedSize ?: 0L
+            val entry = "$modelId\t$fileName\t$sizeVal\t${sha256 ?: ""}"
+            val current = prefs[KEY_HF_FILE_METADATA] ?: emptySet()
+            // keep only one entry per modelId+fileName
+            prefs[KEY_HF_FILE_METADATA] = current.filter { !it.startsWith("$modelId\t$fileName\t") }.toSet() + entry
         }
     }
 
