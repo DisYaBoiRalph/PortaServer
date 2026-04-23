@@ -2,6 +2,10 @@
 #include <android/log.h>
 #include <string>
 #include <vector>
+#include <sys/stat.h>
+#include <errno.h>
+#include <cstdio>
+#include <cstring>
 #include "llama.h"
 
 #define LOG_TAG "LlamaBridge"
@@ -29,6 +33,21 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeLoadModel(
         JNIEnv* env, jobject, jstring jPath, jint nCtx, jint nGpuLayers) {
 
     const char* path = env->GetStringUTFChars(jPath, nullptr);
+    LOGI("nativeLoadModel: opening path: %s", path);
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        LOGI("stat OK: size=%lld, mode=0%o", (long long)st.st_size, st.st_mode);
+        if (!S_ISREG(st.st_mode)) LOGI("path is not a regular file");
+    } else {
+        LOGI("stat failed: errno=%d (%s)", errno, strerror(errno));
+    }
+    FILE* f = fopen(path, "rb");
+    if (f) {
+        LOGI("fopen succeeded");
+        fclose(f);
+    } else {
+        LOGI("fopen failed: errno=%d (%s)", errno, strerror(errno));
+    }
     llama_model_params params = llama_model_default_params();
     params.n_gpu_layers = nGpuLayers;
 

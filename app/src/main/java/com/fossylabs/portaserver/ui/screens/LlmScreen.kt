@@ -273,6 +273,18 @@ fun LlmScreen(
                 HorizontalDivider()
             }
 
+            // Show any in-progress downloads that don't yet have a local model entry
+            val inProgress = downloadStates.filter { (name, state) ->
+                !state.done && localModels.none { it.name == name }
+            }.toList()
+
+            if (inProgress.isNotEmpty()) {
+                items(inProgress) { entry ->
+                    val (fileName, state) = entry
+                    DownloadingModelCard(fileName, state)
+                }
+            }
+
             if (localModels.isEmpty()) {
                 item {
                     Text(
@@ -320,6 +332,7 @@ fun LlmScreen(
                         model = model,
                         isLoaded = isLoaded,
                         isLoading = isLoadingModel,
+                        downloadState = downloadStates[model.name],
                         onLoad = { viewModel.loadModel(model.path) },
                         onUnload = viewModel::unloadModel,
                     )
@@ -404,40 +417,102 @@ private fun ModelCard(
     model: ModelInfo,
     isLoaded: Boolean,
     isLoading: Boolean,
+    downloadState: DownloadState? = null,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(model.name, style = MaterialTheme.typography.bodyMedium)
-                if (model.isRecommended) {
-                    Spacer(Modifier.height(4.dp))
-                    SuggestionChip(
-                        onClick = {},
-                        label = { Text("Recommended", style = MaterialTheme.typography.labelSmall) },
-                        icon = { Icon(Icons.Rounded.Star, null, Modifier.size(14.dp)) },
-                    )
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(model.name, style = MaterialTheme.typography.bodyMedium)
+                    if (model.isRecommended) {
+                        Spacer(Modifier.height(4.dp))
+                        SuggestionChip(
+                            onClick = {},
+                            label = { Text("Recommended", style = MaterialTheme.typography.labelSmall) },
+                            icon = { Icon(Icons.Rounded.Star, null, Modifier.size(14.dp)) },
+                        )
+                    }
+                    if (model.isCorrupted) {
+                        Spacer(Modifier.height(4.dp))
+                        SuggestionChip(
+                            onClick = {},
+                            enabled = false,
+                            label = { Text("Corrupted", style = MaterialTheme.typography.labelSmall) },
+                            icon = { Icon(Icons.Rounded.Warning, null, Modifier.size(14.dp)) },
+                        )
+                    }
                 }
-                if (model.isCorrupted) {
-                    Spacer(Modifier.height(4.dp))
-                    SuggestionChip(
-                        onClick = {},
-                        enabled = false,
-                        label = { Text("Corrupted", style = MaterialTheme.typography.labelSmall) },
-                        icon = { Icon(Icons.Rounded.Warning, null, Modifier.size(14.dp)) },
-                    )
+                Spacer(Modifier.width(8.dp))
+                when {
+                    model.isCorrupted -> FilledTonalButton(onClick = {}, enabled = false) { Text("Load") }
+                    isLoading && !isLoaded -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    isLoaded -> OutlinedButton(onClick = onUnload) { Text("Unload") }
+                    else -> FilledTonalButton(onClick = onLoad) { Text("Load") }
                 }
             }
-            Spacer(Modifier.width(8.dp))
-            when {
-                model.isCorrupted -> FilledTonalButton(onClick = {}, enabled = false) { Text("Load") }
-                isLoading && !isLoaded -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                isLoaded -> OutlinedButton(onClick = onUnload) { Text("Unload") }
-                else -> FilledTonalButton(onClick = onLoad) { Text("Load") }
+
+            // Show active download progress for this model if present
+            downloadState?.let { st ->
+                if (!st.done) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(progress = { st.progress }, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(4.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        val dl = st.downloadedBytes
+                        val tot = st.totalBytes
+                        Text(
+                            text = if (tot != null) "${formatFileSize(dl)} / ${formatFileSize(tot)}" else formatFileSize(dl),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        st.speedBytesPerSec?.let { speed ->
+                            Text(
+                                text = "${formatFileSize(speed)}/s",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadingModelCard(fileName: String, state: DownloadState) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(fileName, style = MaterialTheme.typography.bodyMedium)
+                    Text("Downloading…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                }
+                Spacer(Modifier.width(8.dp))
+                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+            }
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(progress = { state.progress }, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                val dl = state.downloadedBytes
+                val tot = state.totalBytes
+                Text(
+                    text = if (tot != null) "${formatFileSize(dl)} / ${formatFileSize(tot)}" else formatFileSize(dl),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                state.speedBytesPerSec?.let { speed ->
+                    Text(
+                        text = "${formatFileSize(speed)}/s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
             }
         }
     }
@@ -717,15 +792,18 @@ private fun FileDownloadRow(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                file.size?.let { sz ->
-                    Text(
-                        text = formatFileSize(sz),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline,
-                    )
-                }
             }
             Spacer(Modifier.width(8.dp))
+            val displaySize = file.lfs?.size ?: file.size
+            displaySize?.let { sz ->
+                Text(
+                    text = formatFileSize(sz),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.align(Alignment.CenterVertically)
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             when {
                 downloadState?.done == true && downloadState.fileUri != null -> {
                     if (isLoaded) {
@@ -763,6 +841,27 @@ private fun FileDownloadRow(
                 progress = { downloadState.progress },
                 modifier = Modifier.fillMaxWidth(),
             )
+            Spacer(Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                val dl = downloadState.downloadedBytes
+                val tot = downloadState.totalBytes
+                val sp = downloadState.speedBytesPerSec
+                Text(
+                    text = if (tot != null) "${formatFileSize(dl)} / ${formatFileSize(tot)}" else formatFileSize(dl),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                sp?.let { speed ->
+                    Text(
+                        text = "${formatFileSize(speed)}/s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
         }
     }
 }
