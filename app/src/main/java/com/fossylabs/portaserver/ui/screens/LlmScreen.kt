@@ -1,6 +1,7 @@
 package com.fossylabs.portaserver.ui.screens
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -59,6 +60,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,6 +77,7 @@ import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
 import com.fossylabs.portaserver.llm.ModelTier
 import com.fossylabs.portaserver.server.ServerState
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -100,10 +103,12 @@ fun LlmScreen(
 
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     // Holds a pending (modelId, fileName) to resume after directory pick
     var pendingDownload by remember { mutableStateOf<Pair<String, String>?>(null) }
     var pendingDownloadForNotificationPermission by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var pendingServerStartForNotificationPermission by remember { mutableStateOf(false) }
 
     val dirPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -125,7 +130,20 @@ fun LlmScreen(
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) {
+    ) { granted ->
+        val shouldStartServer = pendingServerStartForNotificationPermission
+        pendingServerStartForNotificationPermission = false
+        if (shouldStartServer) {
+            viewModel.startServer()
+            if (!granted) {
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        "Hosting started, but notifications are disabled. Enable them to keep the active LLM indicator visible outside the app.",
+                    )
+                }
+            }
+        }
+
         val pending = pendingDownloadForNotificationPermission
         pendingDownloadForNotificationPermission = null
         if (pending != null) {
@@ -261,7 +279,14 @@ fun LlmScreen(
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
-                                onClick = viewModel::startServer,
+                                onClick = {
+                                    if (needsNotificationPermission(context)) {
+                                        pendingServerStartForNotificationPermission = true
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    } else {
+                                        viewModel.startServer()
+                                    }
+                                },
                                 enabled = serverState == ServerState.STOPPED && loadedModel != null,
                                 modifier = Modifier.weight(1f),
                             ) { Text("Start") }
@@ -441,6 +466,14 @@ fun LlmScreen(
             onUnload = viewModel::unloadModel,
         )
     }
+}
+
+private fun needsNotificationPermission(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+    return ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.POST_NOTIFICATIONS,
+    ) != PackageManager.PERMISSION_GRANTED
 }
 
 @Composable

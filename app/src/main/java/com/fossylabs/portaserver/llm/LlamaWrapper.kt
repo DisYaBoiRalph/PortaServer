@@ -8,6 +8,8 @@ object LlamaWrapper {
 
     // Model
     external fun nativeLoadModel(path: String, nCtx: Int, nGpuLayers: Int): Long
+    external fun nativeLoadModelFromFd(fd: Int, nCtx: Int, nGpuLayers: Int): Long
+    external fun nativeGetLastError(): String?
     external fun nativeFreeModel(modelPtr: Long)
 
     // Context

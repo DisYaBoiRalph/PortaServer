@@ -47,6 +47,8 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val isClearingModelCache by viewModel.isClearingModelCache.collectAsStateWithLifecycle()
+    val clearModelCacheMessage by viewModel.clearModelCacheMessage.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var timeoutFieldValue by remember { mutableStateOf(settings.inactivityTimeoutMinutes?.toString() ?: "") }
@@ -190,6 +192,38 @@ fun SettingsScreen(
                     Icon(Icons.Rounded.Add, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Add directory")
+                }
+            }
+
+            item { SettingsSectionHeader("Storage") }
+
+            item {
+                Text(
+                    text = "Model cache stores temporary copies used for SAF-backed model loading.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+
+            item {
+                FilledTonalButton(
+                    onClick = viewModel::clearModelCache,
+                    enabled = !isClearingModelCache,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Icon(Icons.Rounded.Delete, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (isClearingModelCache) "Clearing model cache..." else "Clear model cache")
+                }
+            }
+
+            clearModelCacheMessage?.let { message ->
+                item {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
                 }
             }
         }

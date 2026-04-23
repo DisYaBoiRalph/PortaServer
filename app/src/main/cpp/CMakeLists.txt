@@ -14,11 +14,11 @@ set(LLAMA_BUILD_TESTS       OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER      OFF CACHE BOOL "" FORCE)
 
-# Pin to a known stable release; update the tag to get newer llama.cpp
+# Pin to a recent stable release for broader GGUF architecture support
 FetchContent_Declare(
     llama
     GIT_REPOSITORY https://github.com/ggerganov/llama.cpp.git
-    GIT_TAG        b5300
+    GIT_TAG        b8895
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(llama)

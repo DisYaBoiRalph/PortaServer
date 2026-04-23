@@ -14,11 +14,20 @@ object ServerManager {
     private val _state = MutableStateFlow(ServerState.STOPPED)
     val state: StateFlow<ServerState> = _state.asStateFlow()
 
-    fun start(context: Context, llmPort: Int, sqlPort: Int, timeoutMs: Long?) {
+    fun start(
+        context: Context,
+        llmPort: Int,
+        sqlPort: Int,
+        timeoutMs: Long?,
+        modelName: String? = null,
+    ) {
         val intent = Intent(context, ServerForegroundService::class.java).apply {
             putExtra(ServerForegroundService.EXTRA_LLM_PORT, llmPort)
             putExtra(ServerForegroundService.EXTRA_SQL_PORT, sqlPort)
             putExtra(ServerForegroundService.EXTRA_TIMEOUT_MS, timeoutMs ?: -1L)
+            modelName?.takeIf { it.isNotBlank() }?.let {
+                putExtra(ServerForegroundService.EXTRA_MODEL_NAME, it)
+            }
         }
         context.startForegroundService(intent)
     }

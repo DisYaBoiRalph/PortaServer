@@ -1,5 +1,12 @@
 package com.fossylabs.portaserver.ui.screens
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -38,10 +45,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fossylabs.portaserver.server.ServerState
@@ -58,9 +67,27 @@ fun SqlScreen(
     val tables by viewModel.tables.collectAsStateWithLifecycle()
     val queryResult by viewModel.queryResult.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var queryText by remember { mutableStateOf("") }
+    var pendingServerStartForNotificationPermission by remember { mutableStateOf(false) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (pendingServerStartForNotificationPermission) {
+            pendingServerStartForNotificationPermission = false
+            viewModel.startServer()
+            if (!granted) {
+                Toast.makeText(
+                    context,
+                    "Hosting started, but notifications are disabled.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
 
     if (showCreateDialog) {
         CreateDatabaseDialog(
@@ -95,7 +122,14 @@ fun SqlScreen(
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
-                                onClick = viewModel::startServer,
+                                onClick = {
+                                    if (needsNotificationPermission(context)) {
+                                        pendingServerStartForNotificationPermission = true
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    } else {
+                                        viewModel.startServer()
+                                    }
+                                },
                                 enabled = serverState == ServerState.STOPPED,
                                 modifier = Modifier.weight(1f),
                             ) { Text("Start") }
@@ -197,6 +231,14 @@ fun SqlScreen(
             item { Spacer(Modifier.height(16.dp)) }
         }
     }
+}
+
+private fun needsNotificationPermission(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+    return ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.POST_NOTIFICATIONS,
+    ) != PackageManager.PERMISSION_GRANTED
 }
 
 @Composable

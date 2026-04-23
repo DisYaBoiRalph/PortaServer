@@ -9,6 +9,7 @@ import com.fossylabs.portaserver.llm.DeviceSpecs
 import com.fossylabs.portaserver.llm.DeviceSpecsReader
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
 import com.fossylabs.portaserver.llm.LlmInferenceEngine
+import com.fossylabs.portaserver.llm.ModelCacheManager
 import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
 import com.fossylabs.portaserver.llm.ModelRepository
@@ -44,6 +45,7 @@ import com.fossylabs.portaserver.notification.DownloadNotifier
 import java.io.File
 import java.io.RandomAccessFile
 import java.io.FileInputStream
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import io.ktor.client.request.get
 
@@ -66,6 +68,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     private val PARALLEL_MIN_FILE_SIZE_BYTES = 2_000_000L
     private val MAX_PARALLEL_RANGES = 4
     private val MIN_FREE_HEAP_FOR_PARALLEL_BYTES = 96L * 1024L * 1024L
+    private val GGUF_SPLIT_NAME_REGEX = Regex("^(.*)-(\\d{5})-of-(\\d{5})(\\.gguf)$", RegexOption.IGNORE_CASE)
 
     private val settingsRepo = SettingsRepository(application.settingsDataStore)
     private val deviceSpecsReader = DeviceSpecsReader(application)
@@ -126,6 +129,8 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     val downloadStates: StateFlow<Map<String, DownloadState>> = _downloadStates.asStateFlow()
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadJobsLock = Any()
+    private val modelCacheLock = Any()
+    private var activeModelCachePaths: Set<String> = emptySet()
 
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -137,6 +142,15 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     init {
         refreshDeviceSpecs()
         refreshLocalModels()
+        viewModelScope.launch(Dispatchers.IO) {
+            val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
+            if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
+                Log.i(
+                    "LlmViewModel",
+                    "Startup model cache cleanup: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
+                )
+            }
+        }
     }
 
     fun refreshDeviceSpecs() {
@@ -591,52 +605,238 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun getLocalIpAddress(): String? = ServerForegroundService.getLocalIpAddress()
 
+    private data class SplitFileName(
+        val prefix: String,
+        val partIndex: Int,
+        val totalParts: Int,
+        val extension: String,
+    )
+
+    private fun parseSplitFileName(name: String): SplitFileName? {
+        val match = GGUF_SPLIT_NAME_REGEX.matchEntire(name) ?: return null
+        val prefix = match.groupValues[1]
+        val partIndex = match.groupValues[2].toIntOrNull() ?: return null
+        val totalParts = match.groupValues[3].toIntOrNull() ?: return null
+        val extension = match.groupValues[4].lowercase(Locale.US)
+        if (partIndex <= 0 || totalParts <= 1 || partIndex > totalParts) return null
+        return SplitFileName(
+            prefix = prefix,
+            partIndex = partIndex,
+            totalParts = totalParts,
+            extension = extension,
+        )
+    }
+
+    private fun buildSplitPartName(split: SplitFileName, index: Int): String {
+        val indexPadded = String.format(Locale.US, "%05d", index)
+        val totalPadded = String.format(Locale.US, "%05d", split.totalParts)
+        return "${split.prefix}-$indexPadded-of-$totalPadded${split.extension}"
+    }
+
+    private fun queryDocumentDisplayName(uri: Uri): String? {
+        val cursor = getApplication<Application>().contentResolver.query(
+            uri,
+            arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+            null,
+            null,
+            null,
+        ) ?: return null
+        return cursor.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+    }
+
+    private fun documentParentHint(uri: Uri): String? {
+        val docId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return null
+        val parent = docId.substringBeforeLast('/', "")
+        return parent.takeIf { it.isNotBlank() }
+    }
+
+    private fun ensureCachedModelFile(sourceUri: Uri, cacheKey: String, preferredName: String): File {
+        val app = getApplication<Application>()
+        val resolver = app.contentResolver
+        val cacheFile = ModelCacheManager.cacheFileForUri(app.cacheDir, cacheKey, preferredName)
+        val sourceSize = getDocumentSize(sourceUri).takeIf { it > 0L }
+        val canReuseCache = sourceSize != null && cacheFile.exists() && cacheFile.length() == sourceSize
+
+        if (canReuseCache) {
+            Log.i("LlmViewModel", "Reusing existing model cache file: ${cacheFile.absolutePath}")
+            return cacheFile
+        }
+
+        val partFile = File("${cacheFile.absolutePath}.part")
+        try {
+            if (partFile.exists()) partFile.delete()
+            resolver.openInputStream(sourceUri)?.use { input ->
+                Log.i("LlmViewModel", "Copying SAF content to cache file: ${cacheFile.absolutePath}")
+                partFile.outputStream().use { output ->
+                    input.copyTo(output, IO_BUFFER_SIZE)
+                }
+            } ?: error("Cannot open model input stream: $sourceUri")
+
+            if (cacheFile.exists() && !cacheFile.delete()) {
+                error("Cannot replace cache file: ${cacheFile.absolutePath}")
+            }
+            if (!partFile.renameTo(cacheFile)) {
+                partFile.inputStream().use { input ->
+                    cacheFile.outputStream().use { output ->
+                        input.copyTo(output, IO_BUFFER_SIZE)
+                    }
+                }
+                partFile.delete()
+            }
+
+            sourceSize?.let { expected ->
+                val actual = cacheFile.length()
+                if (actual != expected) {
+                    error("Cache copy size mismatch for $preferredName: expected=$expected, actual=$actual")
+                }
+            }
+        } catch (e: Exception) {
+            partFile.delete()
+            cacheFile.delete()
+            throw e
+        }
+
+        return cacheFile
+    }
+
+    private fun getActiveModelCachePaths(): Set<String> = synchronized(modelCacheLock) {
+        activeModelCachePaths
+    }
+
+    private fun setActiveModelCachePaths(paths: Set<String>) {
+        synchronized(modelCacheLock) {
+            activeModelCachePaths = paths
+        }
+    }
+
     fun loadModel(path: String) {
         if (isLoadingModel.value) return
         _isPreparingModelLoad.value = true
         viewModelScope.launch {
+            var engineLoadAttempted = false
+            var newActiveCachePaths: Set<String> = emptySet()
             try {
                 if (path.startsWith("content://")) {
-                    // SAF content URI — first try /proc/self/fd/<n> for NDK access.
-                    // If that fails on some Android versions/providers, fall back
-                    // to copying the content to a cache file and loading from there.
+                    // SAF content URI — first try native fd loading.
+                    // If provider semantics block reopen-from-proc behavior, fall back
+                    // to deterministic cache copy and load from the cache path.
                     withContext(Dispatchers.IO) {
-                        val resolver = getApplication<Application>().contentResolver
-                        val uri = android.net.Uri.parse(path)
+                        val app = getApplication<Application>()
+                        val resolver = app.contentResolver
+                        val uri = Uri.parse(path)
+                        val selectedModel = _localModels.value.firstOrNull { it.path == path }
+                        val selectedFileName = selectedModel?.name
+                            ?: queryDocumentDisplayName(uri)
+                            ?: "model.gguf"
 
-                        // Fast path: open PFD and pass fd path to native loader.
+                        // Fast path: open PFD and call native fd loader.
                         var fastPathOk = false
                         try {
                             val pfd = resolver.openFileDescriptor(uri, "r")
                                 ?: error("Cannot open model file: $path")
                             pfd.use {
-                                Log.i("LlmViewModel", "Loading model via PFD: /proc/self/fd/${it.fd}")
-                                LlmInferenceEngine.loadModel("/proc/self/fd/${it.fd}")
+                                Log.i(
+                                    "LlmViewModel",
+                                    "Loading model via native fd loader: fd=${it.fd}, name=$selectedFileName",
+                                )
+                                engineLoadAttempted = true
+                                LlmInferenceEngine.loadModelFromFd(it.fd, selectedFileName)
                             }
                             fastPathOk = true
                         } catch (e: Exception) {
-                            Log.i("LlmViewModel", "PFD fast path failed, will copy to cache: ${e.message}")
+                            Log.i("LlmViewModel", "Native fd load failed, will copy to cache: ${e.message}")
                         }
 
                         if (!fastPathOk) {
-                            // Fallback: copy the document into a cache file and load from it.
-                            val cacheFile = File(getApplication<Application>().cacheDir,
-                                "model-${System.currentTimeMillis()}.bin")
-                            resolver.openInputStream(uri)?.use { input ->
-                                Log.i("LlmViewModel", "Copying SAF content to cache file: ${cacheFile.absolutePath}")
-                                cacheFile.outputStream().use { output ->
-                                    input.copyTo(output)
-                                }
-                            } ?: error("Cannot open model input stream: $path")
+                            val copiedCacheFiles = linkedSetOf<File>()
+                            val selectedSplit = parseSplitFileName(selectedFileName)
+                            val selectedParent = documentParentHint(uri)
 
-                            LlmInferenceEngine.loadModel(cacheFile.absolutePath)
+                            val entryCacheFile = if (selectedSplit != null) {
+                                val expectedPartNames = (1..selectedSplit.totalParts)
+                                    .map { index -> buildSplitPartName(selectedSplit, index) }
+
+                                val candidateModels = _localModels.value.filter { model ->
+                                    if (selectedParent == null) return@filter true
+                                    val modelUri = runCatching { Uri.parse(model.path) }.getOrNull()
+                                    modelUri != null && documentParentHint(modelUri) == selectedParent
+                                }
+                                val modelsByName = candidateModels.associateBy { it.name.lowercase(Locale.US) }
+                                val missingParts = expectedPartNames.filter { partName ->
+                                    modelsByName[partName.lowercase(Locale.US)] == null
+                                }
+
+                                if (missingParts.isNotEmpty()) {
+                                    error(
+                                        "Split model detected ($selectedFileName) but missing " +
+                                            "${missingParts.size}/${selectedSplit.totalParts} parts in scanned directories",
+                                    )
+                                }
+
+                                var selectedPartCache: File? = null
+                                for (partName in expectedPartNames) {
+                                    val model = modelsByName[partName.lowercase(Locale.US)]
+                                        ?: error("Missing split part metadata for $partName")
+                                    val partUri = Uri.parse(model.path)
+                                    val partCache = ensureCachedModelFile(partUri, model.path, partName)
+                                    copiedCacheFiles.add(partCache)
+                                    if (partName.equals(selectedFileName, ignoreCase = true)) {
+                                        selectedPartCache = partCache
+                                    }
+                                }
+
+                                selectedPartCache ?: copiedCacheFiles.firstOrNull()
+                                ?: error("Split model cache copy failed for $selectedFileName")
+                            } else {
+                                val cacheFile = ensureCachedModelFile(uri, uri.toString(), selectedFileName)
+                                copiedCacheFiles.add(cacheFile)
+                                cacheFile
+                            }
+
+                            try {
+                                engineLoadAttempted = true
+                                LlmInferenceEngine.loadModel(entryCacheFile.absolutePath)
+                            } catch (e: Exception) {
+                                // Remove copied files when load fails to avoid cache bloat.
+                                copiedCacheFiles.forEach { it.delete() }
+                                throw e
+                            }
+
+                            newActiveCachePaths = copiedCacheFiles.map { it.absolutePath }.toSet()
                         }
                     }
                 } else {
+                    engineLoadAttempted = true
                     LlmInferenceEngine.loadModel(path)
+                    newActiveCachePaths = emptySet()
+                }
+                setActiveModelCachePaths(newActiveCachePaths)
+                withContext(Dispatchers.IO) {
+                    val cleanup = ModelCacheManager.clearModelCache(
+                        getApplication<Application>().cacheDir,
+                        keepAbsolutePaths = getActiveModelCachePaths(),
+                    )
+                    if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
+                        Log.i(
+                            "LlmViewModel",
+                            "Model cache cleanup after load: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
+                        )
+                    }
                 }
                 _errorMessage.value = null
             } catch (e: Exception) {
+                if (engineLoadAttempted) {
+                    setActiveModelCachePaths(emptySet())
+                    withContext(Dispatchers.IO) {
+                        val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
+                        if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
+                            Log.i(
+                                "LlmViewModel",
+                                "Model cache cleanup after load error: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
+                            )
+                        }
+                    }
+                }
                 _errorMessage.value = "Failed to load model: ${e.message}"
             } finally {
                 _isPreparingModelLoad.value = false
@@ -646,12 +846,28 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
     fun unloadModel() {
         LlmInferenceEngine.unloadModel()
+        setActiveModelCachePaths(emptySet())
+        viewModelScope.launch(Dispatchers.IO) {
+            val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
+            if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
+                Log.i(
+                    "LlmViewModel",
+                    "Model cache cleanup after unload: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
+                )
+            }
+        }
     }
 
     fun startServer() {
         val s = settings.value
         val timeoutMs = s.inactivityTimeoutMinutes?.let { it.toLong() * 60_000L }
-        ServerManager.start(getApplication(), s.llmPort, s.sqlPort, timeoutMs)
+        ServerManager.start(
+            context = getApplication(),
+            llmPort = s.llmPort,
+            sqlPort = s.sqlPort,
+            timeoutMs = timeoutMs,
+            modelName = loadedModel.value?.name,
+        )
     }
 
     fun stopServer() {

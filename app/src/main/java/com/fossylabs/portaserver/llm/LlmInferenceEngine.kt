@@ -32,33 +32,78 @@ object LlmInferenceEngine {
         nThreads: Int = maxOf(1, Runtime.getRuntime().availableProcessors() / 2),
         temperature: Float = 0.7f,
         topP: Float = 0.9f,
+    ) {
+        loadModelInternal(
+            modelLabel = modelPath,
+            nCtx = nCtx,
+            nThreads = nThreads,
+            temperature = temperature,
+            topP = topP,
+            nativeModelLoader = { LlamaWrapper.nativeLoadModel(modelPath, nCtx, 0) },
+        )
+    }
+
+    suspend fun loadModelFromFd(
+        fd: Int,
+        label: String,
+        nCtx: Int = 2048,
+        nThreads: Int = maxOf(1, Runtime.getRuntime().availableProcessors() / 2),
+        temperature: Float = 0.7f,
+        topP: Float = 0.9f,
+    ) {
+        loadModelInternal(
+            modelLabel = label,
+            nCtx = nCtx,
+            nThreads = nThreads,
+            temperature = temperature,
+            topP = topP,
+            nativeModelLoader = { LlamaWrapper.nativeLoadModelFromFd(fd, nCtx, 0) },
+        )
+    }
+
+    private suspend fun loadModelInternal(
+        modelLabel: String,
+        nCtx: Int,
+        nThreads: Int,
+        temperature: Float,
+        topP: Float,
+        nativeModelLoader: () -> Long,
     ) = withContext(Dispatchers.IO) {
         mutex.withLock {
             _isLoading.value = true
             try {
                 releaseNative()
 
-                modelPtr = LlamaWrapper.nativeLoadModel(modelPath, nCtx, 0)
-                check(modelPtr != 0L) { "Failed to load model: $modelPath" }
+                modelPtr = nativeModelLoader()
+                if (modelPtr == 0L) {
+                    error(withNativeDetail("Failed to load model: $modelLabel"))
+                }
 
                 ctxPtr = LlamaWrapper.nativeNewContext(modelPtr, nCtx, nThreads)
                 if (ctxPtr == 0L) {
                     LlamaWrapper.nativeFreeModel(modelPtr)
                     modelPtr = 0L
-                    error("Failed to create context for: $modelPath")
+                    error(withNativeDetail("Failed to create context for: $modelLabel"))
                 }
 
                 samplerPtr = LlamaWrapper.nativeNewSampler(
                     temperature, topP, System.currentTimeMillis().toInt()
                 )
+                if (samplerPtr == 0L) {
+                    LlamaWrapper.nativeFreeContext(ctxPtr)
+                    ctxPtr = 0L
+                    LlamaWrapper.nativeFreeModel(modelPtr)
+                    modelPtr = 0L
+                    error(withNativeDetail("Failed to create sampler for: $modelLabel"))
+                }
                 nPast = 0
 
                 _loadedModel.value = ModelInfo(
-                    path = modelPath,
-                    name = File(modelPath).name,
+                    path = modelLabel,
+                    name = File(modelLabel).name,
                     isLocal = true,
                 )
-                LogRepository.log(LogLevel.INFO, "Model loaded: ${File(modelPath).name}")
+                LogRepository.log(LogLevel.INFO, "Model loaded: ${File(modelLabel).name}")
             } finally {
                 _isLoading.value = false
             }
@@ -121,5 +166,14 @@ object LlmInferenceEngine {
         if (samplerPtr != 0L) { LlamaWrapper.nativeFreeSampler(samplerPtr); samplerPtr = 0L }
         if (modelPtr != 0L) { LlamaWrapper.nativeFreeModel(modelPtr); modelPtr = 0L }
         nPast = 0
+    }
+
+    private fun withNativeDetail(message: String): String {
+        val detail = try {
+            LlamaWrapper.nativeGetLastError()?.trim().takeIf { !it.isNullOrEmpty() }
+        } catch (_: Throwable) {
+            null
+        }
+        return if (detail != null) "$message; native: $detail" else message
     }
 }

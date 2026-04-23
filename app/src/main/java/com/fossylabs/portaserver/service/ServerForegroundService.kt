@@ -42,9 +42,10 @@ class ServerForegroundService : Service() {
 
         val llmPort = intent?.getIntExtra(EXTRA_LLM_PORT, DEFAULT_LLM_PORT) ?: DEFAULT_LLM_PORT
         val sqlPort = intent?.getIntExtra(EXTRA_SQL_PORT, DEFAULT_SQL_PORT) ?: DEFAULT_SQL_PORT
+        val modelName = intent?.getStringExtra(EXTRA_MODEL_NAME)
         val timeoutMs = intent?.getLongExtra(EXTRA_TIMEOUT_MS, -1L)?.takeIf { it > 0L }
 
-        val notification = buildNotification(llmPort, sqlPort)
+        val notification = buildNotification(llmPort, sqlPort, modelName)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
@@ -80,19 +81,25 @@ class ServerForegroundService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             "PortaServer",
-            NotificationManager.IMPORTANCE_LOW,
+            NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "Indicates the server is running"
+            description = "Shows when PortaServer is actively hosting"
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun buildNotification(llmPort: Int, sqlPort: Int): Notification {
+    private fun buildNotification(llmPort: Int, sqlPort: Int, modelName: String?): Notification {
         val ip = getLocalIpAddress()
-        val contentText = if (ip != null)
+        val endpointText = if (ip != null)
             "http://$ip:$llmPort  ·  SQL :$sqlPort"
         else
             "LLM :$llmPort  ·  SQL :$sqlPort"
+        val contentText = modelName?.takeIf { it.isNotBlank() }?.let {
+            "LLM active: $it"
+        } ?: "LLM hosting is active"
+        val expandedText = modelName?.takeIf { it.isNotBlank() }?.let {
+            "LLM active: $it\n$endpointText"
+        } ?: "LLM hosting is active\n$endpointText"
         val openIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
@@ -104,11 +111,15 @@ class ServerForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("PortaServer running")
+            .setContentTitle("PortaServer hosting")
             .setContentText(contentText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
             .setSmallIcon(android.R.drawable.ic_menu_upload)
             .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .build()
     }
@@ -117,10 +128,11 @@ class ServerForegroundService : Service() {
         const val EXTRA_LLM_PORT = "llm_port"
         const val EXTRA_SQL_PORT = "sql_port"
         const val EXTRA_TIMEOUT_MS = "timeout_ms"
+        const val EXTRA_MODEL_NAME = "model_name"
         const val DEFAULT_LLM_PORT = 8080
         const val DEFAULT_SQL_PORT = 8181
         private const val ACTION_STOP = "com.fossylabs.portaserver.ACTION_STOP"
-        private const val CHANNEL_ID = "portaserver_channel"
+        private const val CHANNEL_ID = "portaserver_hosting_channel"
         private const val NOTIFICATION_ID = 1
 
         fun getLocalIpAddress(): String? = try {
