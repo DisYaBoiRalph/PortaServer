@@ -519,7 +519,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                         downloadedBytes = totalDownloaded, totalBytes = expectedSize, speedBytesPerSec = null
                     ))
                 }
-                try { DownloadNotifier.complete(getApplication(), fileName.hashCode(), fileName, fileUri.toString()) } catch (_: Exception) {}
+                try { DownloadNotifier.complete(getApplication(), fileName.hashCode(), fileName) } catch (_: Exception) {}
                 settingsRepo.saveFileMeta(fileUri.toString(), totalDownloaded, verifiedSha256 ?: expectedSha256)
                 refreshLocalModels()
             } catch (_: CancellationException) {

@@ -96,7 +96,7 @@ object DownloadNotifier {
         mgr.notify(id, builder.build())
     }
 
-    fun complete(context: Context, id: Int, title: String, fileUri: String) {
+    fun complete(context: Context, id: Int, title: String) {
         ensureChannel(context)
         val mgr = context.getSystemService(NotificationManager::class.java)
         if (!notificationsAllowed(context, mgr)) {
