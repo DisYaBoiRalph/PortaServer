@@ -193,7 +193,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
             // Background SHA256 check for files that passed size check; consider both local and HF metadata
             val hasAnySha = metadata.any { it.value.sha256 != null } || hfMetadata.any { it.value.sha256 != null }
             if (hasAnySha) {
-                viewModelScope.launch(Dispatchers.IO) {
+                launch(Dispatchers.IO) {
                     val updated = scanned.map { model ->
                         if (model.isCorrupted) return@map model
                         val localSha = metadata[model.path]?.sha256
