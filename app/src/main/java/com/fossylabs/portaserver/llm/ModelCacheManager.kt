@@ -1,5 +1,6 @@
 package com.fossylabs.portaserver.llm
 
+import com.fossylabs.portaserver.util.toHexString
 import java.io.File
 import java.security.MessageDigest
 
@@ -77,6 +78,6 @@ object ModelCacheManager {
     private fun stableHash(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
         // 16 bytes of SHA-256 is enough for a compact, deterministic cache filename.
-        return digest.take(16).joinToString(separator = "") { "%02x".format(it) }
+        return digest.take(16).toByteArray().toHexString()
     }
 }

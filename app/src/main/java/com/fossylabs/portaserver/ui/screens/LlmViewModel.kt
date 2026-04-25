@@ -42,6 +42,7 @@ import kotlinx.coroutines.withContext
 import android.util.Log
 import kotlinx.serialization.json.Json
 import com.fossylabs.portaserver.notification.DownloadNotifier
+import com.fossylabs.portaserver.util.toHexString
 import java.io.File
 import java.io.RandomAccessFile
 import java.io.FileInputStream
@@ -503,7 +504,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 // ── Verify SHA256 if available ─────────────────────────────
                 var verifiedSha256: String? = null
                 if (digest != null) {
-                    val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                    val actualSha256 = digest.digest().toHexString()
                     if (actualSha256 != expectedSha256) {
                         DocumentsContract.deleteDocument(resolver, fileUri)
                         _downloadStates.update { it - fileName }
@@ -601,7 +602,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
             var n: Int
             while (input.read(buf).also { n = it } != -1) digest.update(buf, 0, n)
         }
-        return digest.digest().joinToString("") { "%02x".format(it) }
+        return digest.digest().toHexString()
     }
 
     private fun getLocalIpAddress(): String? = ServerForegroundService.getLocalIpAddress()
