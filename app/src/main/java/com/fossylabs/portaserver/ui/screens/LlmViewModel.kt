@@ -845,9 +845,9 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun unloadModel() {
-        LlmInferenceEngine.unloadModel()
         setActiveModelCachePaths(emptySet())
         viewModelScope.launch(Dispatchers.IO) {
+            LlmInferenceEngine.unloadModel()
             val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
             if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
                 Log.i(

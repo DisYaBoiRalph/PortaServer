@@ -156,9 +156,14 @@ object LlmInferenceEngine {
         }
     }
 
-    fun unloadModel() {
-        releaseNative()
-        _loadedModel.value = null
+    suspend fun unloadModel() {
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                releaseNative()
+                _loadedModel.value = null
+                LogRepository.log(LogLevel.INFO, "Model unloaded")
+            }
+        }
     }
 
     private fun releaseNative() {
