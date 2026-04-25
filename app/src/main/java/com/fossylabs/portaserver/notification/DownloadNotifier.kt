@@ -116,6 +116,7 @@ object DownloadNotifier {
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
         mgr.notify(id, builder.build())
+        synchronized(toastShown) { toastShown.remove(id) }
     }
 
     fun cancel(context: Context, id: Int) {
