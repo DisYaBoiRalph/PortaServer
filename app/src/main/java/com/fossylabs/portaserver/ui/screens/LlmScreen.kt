@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.fossylabs.portaserver.llm.DownloadState
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
 import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
