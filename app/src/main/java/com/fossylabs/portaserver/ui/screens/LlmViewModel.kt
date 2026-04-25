@@ -726,8 +726,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadModel(path: String) {
-        if (isLoadingModel.value) return
-        _isPreparingModelLoad.value = true
+        if (!_isPreparingModelLoad.compareAndSet(false, true)) return
         viewModelScope.launch {
             var engineLoadAttempted = false
             var newActiveCachePaths: Set<String> = emptySet()
