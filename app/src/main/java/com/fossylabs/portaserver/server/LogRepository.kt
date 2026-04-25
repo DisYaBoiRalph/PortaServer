@@ -4,9 +4,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 enum class LogLevel { INFO, WARN, ERROR }
 
@@ -16,8 +16,11 @@ data class LogEntry(
     val message: String,
 ) {
     val formattedTime: String
-        get() = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
-            .format(Date(timestamp))
+        get() = FORMATTER.format(Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()))
+
+    private companion object {
+        val FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+    }
 }
 
 object LogRepository {
