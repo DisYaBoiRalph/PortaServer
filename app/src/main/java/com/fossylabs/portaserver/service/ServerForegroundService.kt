@@ -52,9 +52,11 @@ class ServerForegroundService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        server = KtorServer(llmPort, sqlPort, inactivityWatcher::recordRequest).also { it.start() }
-        SqliteManager.configure(getExternalFilesDir(null) ?: filesDir)
-        LogRepository.log(LogLevel.INFO, "Server started — LLM :$llmPort  SQL :$sqlPort")
+        if (server == null) {
+            server = KtorServer(llmPort, sqlPort, inactivityWatcher::recordRequest).also { it.start() }
+            SqliteManager.configure(getExternalFilesDir(null) ?: filesDir)
+            LogRepository.log(LogLevel.INFO, "Server started — LLM :$llmPort  SQL :$sqlPort")
+        }
         ServerManager.onServerStarted()
 
         timeoutMs?.let { timeout ->
