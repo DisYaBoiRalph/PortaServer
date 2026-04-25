@@ -113,10 +113,22 @@ object LlmInferenceEngine {
     suspend fun generate(
         messages: List<ChatMessage>,
         maxTokens: Int = 512,
+        temperature: Float? = null,
+        topP: Float? = null,
         onToken: suspend (String) -> Unit,
     ) = withContext(Dispatchers.IO) {
         mutex.withLock {
             check(modelPtr != 0L && ctxPtr != 0L) { "No model loaded" }
+
+            val activeSamplerPtr = if (temperature != null || topP != null) {
+                LlamaWrapper.nativeNewSampler(
+                    temperature ?: 0.7f,
+                    topP ?: 0.9f,
+                    System.currentTimeMillis().toInt(),
+                )
+            } else {
+                samplerPtr
+            }
 
             LogRepository.log(LogLevel.INFO, "Generation started (${messages.size} messages, max $maxTokens tokens)")
 
@@ -142,8 +154,9 @@ object LlmInferenceEngine {
             nPast += promptTokens.size
 
             val eosToken = LlamaWrapper.nativeEosToken(modelPtr)
+            try {
             repeat(maxTokens) {
-                val nextToken = LlamaWrapper.nativeSample(samplerPtr, ctxPtr)
+                val nextToken = LlamaWrapper.nativeSample(activeSamplerPtr, ctxPtr)
                 if (nextToken == eosToken) return@withContext
 
                 val piece = LlamaWrapper.nativeTokenToString(modelPtr, nextToken)
@@ -152,6 +165,9 @@ object LlmInferenceEngine {
                 val ok = LlamaWrapper.nativeDecode(ctxPtr, intArrayOf(nextToken), nPast)
                 nPast++
                 if (!ok) return@withContext
+            }
+            } finally {
+                if (activeSamplerPtr != samplerPtr) LlamaWrapper.nativeFreeSampler(activeSamplerPtr)
             }
         }
     }

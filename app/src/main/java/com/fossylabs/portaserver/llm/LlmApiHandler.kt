@@ -39,6 +39,8 @@ fun Route.llmRoutes() {
 
         val messages = request.messages.map { ChatMessage(it.role, it.content) }
         val maxTokens = request.maxTokens ?: 512
+        val temperature = request.temperature
+        val topP = request.topP
         val modelName = LlmInferenceEngine.loadedModel.value!!.name
         val requestId = "chatcmpl-${System.currentTimeMillis()}"
         val created = System.currentTimeMillis() / 1_000L
@@ -58,7 +60,7 @@ fun Route.llmRoutes() {
                 writeStringUtf8("data: $roleDelta\n\n")
                 flush()
 
-                LlmInferenceEngine.generate(messages, maxTokens) { token ->
+                LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { token ->
                     val chunk = apiJson.encodeToString(
                         ChatCompletionChunk(
                             id = requestId, created = created, model = modelName,
@@ -74,7 +76,7 @@ fun Route.llmRoutes() {
             }
         } else {
             val sb = StringBuilder()
-            LlmInferenceEngine.generate(messages, maxTokens) { sb.append(it) }
+            LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { sb.append(it) }
             call.respond(
                 ChatCompletionResponse(
                     id = requestId,
