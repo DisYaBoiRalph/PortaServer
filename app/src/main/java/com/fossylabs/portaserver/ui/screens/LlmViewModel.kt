@@ -61,14 +61,15 @@ data class DownloadState(
 
 class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
-    // Buffer size for I/O operations (bytes).
-    private val IO_BUFFER_SIZE = 8192
-    private val UI_PROGRESS_UPDATE_INTERVAL_MS = 250L
-    private val NOTIFICATION_UPDATE_INTERVAL_MS = 750L
-    private val PARALLEL_MIN_FILE_SIZE_BYTES = 2_000_000L
-    private val MAX_PARALLEL_RANGES = 4
-    private val MIN_FREE_HEAP_FOR_PARALLEL_BYTES = 96L * 1024L * 1024L
-    private val GGUF_SPLIT_NAME_REGEX = Regex("^(.*)-(\\d{5})-of-(\\d{5})(\\.gguf)$", RegexOption.IGNORE_CASE)
+    private companion object {
+        const val IO_BUFFER_SIZE = 8192
+        const val UI_PROGRESS_UPDATE_INTERVAL_MS = 250L
+        const val NOTIFICATION_UPDATE_INTERVAL_MS = 750L
+        const val PARALLEL_MIN_FILE_SIZE_BYTES = 2_000_000L
+        const val MAX_PARALLEL_RANGES = 4
+        const val MIN_FREE_HEAP_FOR_PARALLEL_BYTES = 96L * 1024L * 1024L
+        val GGUF_SPLIT_NAME_REGEX = Regex("^(.*)-(\\d{5})-of-(\\d{5})(\\.gguf)$", RegexOption.IGNORE_CASE)
+    }
 
     private val settingsRepo = SettingsRepository(application.settingsDataStore)
     private val deviceSpecsReader = DeviceSpecsReader(application)
