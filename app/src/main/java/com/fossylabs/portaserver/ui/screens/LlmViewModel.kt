@@ -427,8 +427,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         RandomAccessFile(tempFile, "rw").use { raf -> raf.setLength(totalLen) }
 
-                        val maxParallelByHeap = when {
-                            freeHeapBytes >= 192L * 1024L * 1024L -> MAX_PARALLEL_RANGES
+                        val maxParallelByHeap = when {                            freeHeapBytes >= 192L * 1024L * 1024L -> MAX_PARALLEL_RANGES
                             freeHeapBytes >= 144L * 1024L * 1024L -> 3
                             else -> 2
                         }
@@ -449,6 +448,11 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
                         try {
                             // Download ranges in parallel and write directly into the temp file
+                            java.nio.channels.FileChannel.open(
+                                tempFile.toPath(),
+                                java.nio.file.StandardOpenOption.READ,
+                                java.nio.file.StandardOpenOption.WRITE,
+                            ).use { fc ->
                             kotlinx.coroutines.coroutineScope {
                                 val jobs = ranges.map { (start, end) ->
                                     launch(Dispatchers.IO) {
@@ -458,19 +462,19 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                                         }
                                         val ch = resp.bodyAsChannel()
                                         val buf = ByteArray(IO_BUFFER_SIZE)
-                                        RandomAccessFile(tempFile, "rw").use { rafChunk ->
-                                            rafChunk.seek(start)
-                                            while (!ch.isClosedForRead) {
-                                                val r = ch.readAvailable(buf)
-                                                if (r <= 0) break
-                                                rafChunk.write(buf, 0, r)
-                                                val tot = totalAtomic.addAndGet(r.toLong())
-                                                publishProgress(tot, totalLen)
-                                            }
+                                        var pos = start
+                                        while (!ch.isClosedForRead) {
+                                            val r = ch.readAvailable(buf)
+                                            if (r <= 0) break
+                                            fc.write(java.nio.ByteBuffer.wrap(buf, 0, r), pos)
+                                            pos += r
+                                            val tot = totalAtomic.addAndGet(r.toLong())
+                                            publishProgress(tot, totalLen)
                                         }
                                     }
                                 }
                                 jobs.forEach { it.join() }
+                            }
                             }
 
                             totalDownloaded = totalAtomic.get()
