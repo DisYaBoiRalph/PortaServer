@@ -11,10 +11,21 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 data class FileMeta(val expectedSize: Long, val sha256: String?)
+
+@Serializable
+private data class FileMetaEntry(val uri: String, val size: Long, val sha256: String?)
+
+@Serializable
+private data class HfFileMetaEntry(val modelId: String, val fileName: String, val size: Long, val sha256: String?)
+
+private val metaJson = Json { ignoreUnknownKeys = true }
 
 data class SettingsState(
     val backgroundEnabled: Boolean = true,
@@ -50,22 +61,38 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             sqlPort = prefs[KEY_SQL_PORT] ?: 8181,
             scanDirectories = prefs[KEY_SCAN_DIRS] ?: emptySet(),
             downloadDirectory = prefs[KEY_DOWNLOAD_DIR],
-            fileMetadata = (prefs[KEY_FILE_METADATA] ?: emptySet()).associate { entry ->
-                val parts = entry.split('\t', limit = 3)
-                val uri = parts[0]
-                val size = parts.getOrNull(1)?.toLongOrNull() ?: 0L
-                val sha256 = parts.getOrNull(2)?.takeIf { it.isNotEmpty() }
-                uri to FileMeta(size, sha256)
-            },
-            hfFileMetadata = (prefs[KEY_HF_FILE_METADATA] ?: emptySet()).associate { entry ->
-                val parts = entry.split('\t', limit = 4)
-                val modelId = parts.getOrNull(0) ?: ""
-                val filename = parts.getOrNull(1) ?: ""
-                val key = "hf://$modelId/$filename"
-                val size = parts.getOrNull(2)?.toLongOrNull() ?: 0L
-                val sha256 = parts.getOrNull(3)?.takeIf { it.isNotEmpty() }
-                key to FileMeta(size, sha256)
-            },
+            fileMetadata = (prefs[KEY_FILE_METADATA] ?: emptySet()).mapNotNull { raw ->
+                runCatching {
+                    if (raw.startsWith("{")) {
+                        val e = metaJson.decodeFromString<FileMetaEntry>(raw)
+                        e.uri to FileMeta(e.size, e.sha256)
+                    } else {
+                        // legacy tab-delimited fallback
+                        val parts = raw.split('\t', limit = 3)
+                        val uri = parts[0]
+                        val size = parts.getOrNull(1)?.toLongOrNull() ?: 0L
+                        val sha256 = parts.getOrNull(2)?.takeIf { it.isNotEmpty() }
+                        uri to FileMeta(size, sha256)
+                    }
+                }.getOrNull()
+            }.toMap(),
+            hfFileMetadata = (prefs[KEY_HF_FILE_METADATA] ?: emptySet()).mapNotNull { raw ->
+                runCatching {
+                    if (raw.startsWith("{")) {
+                        val e = metaJson.decodeFromString<HfFileMetaEntry>(raw)
+                        "hf://${e.modelId}/${e.fileName}" to FileMeta(e.size, e.sha256)
+                    } else {
+                        // legacy tab-delimited fallback
+                        val parts = raw.split('\t', limit = 4)
+                        val modelId = parts.getOrNull(0) ?: ""
+                        val filename = parts.getOrNull(1) ?: ""
+                        val key = "hf://$modelId/$filename"
+                        val size = parts.getOrNull(2)?.toLongOrNull() ?: 0L
+                        val sha256 = parts.getOrNull(3)?.takeIf { it.isNotEmpty() }
+                        key to FileMeta(size, sha256)
+                    }
+                }.getOrNull()
+            }.toMap(),
         )
     }
 
@@ -104,27 +131,48 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
     }
 
     suspend fun saveFileMeta(fileUri: String, expectedSize: Long, sha256: String?) {
+        val entry = metaJson.encodeToString(FileMetaEntry(fileUri, expectedSize, sha256))
         dataStore.edit { prefs ->
-            val entry = "$fileUri\t$expectedSize\t${sha256 ?: ""}"
             val current = prefs[KEY_FILE_METADATA] ?: emptySet()
-            prefs[KEY_FILE_METADATA] = current.filter { !it.startsWith("$fileUri\t") }.toSet() + entry
+            // Remove any existing entry for this URI (both JSON and legacy formats)
+            prefs[KEY_FILE_METADATA] = current.filter { raw ->
+                if (raw.startsWith("{")) {
+                    runCatching { metaJson.decodeFromString<FileMetaEntry>(raw).uri != fileUri }.getOrDefault(true)
+                } else {
+                    !raw.startsWith("$fileUri\t")
+                }
+            }.toSet() + entry
         }
     }
 
     suspend fun saveRemoteFileMeta(modelId: String, fileName: String, expectedSize: Long?, sha256: String?) {
+        val entry = metaJson.encodeToString(HfFileMetaEntry(modelId, fileName, expectedSize ?: 0L, sha256))
         dataStore.edit { prefs ->
-            val sizeVal = expectedSize ?: 0L
-            val entry = "$modelId\t$fileName\t$sizeVal\t${sha256 ?: ""}"
             val current = prefs[KEY_HF_FILE_METADATA] ?: emptySet()
-            // keep only one entry per modelId+fileName
-            prefs[KEY_HF_FILE_METADATA] = current.filter { !it.startsWith("$modelId\t$fileName\t") }.toSet() + entry
+            // Remove any existing entry for this modelId+fileName (both JSON and legacy formats)
+            prefs[KEY_HF_FILE_METADATA] = current.filter { raw ->
+                if (raw.startsWith("{")) {
+                    runCatching {
+                        val e = metaJson.decodeFromString<HfFileMetaEntry>(raw)
+                        e.modelId != modelId || e.fileName != fileName
+                    }.getOrDefault(true)
+                } else {
+                    !raw.startsWith("$modelId\t$fileName\t")
+                }
+            }.toSet() + entry
         }
     }
 
     suspend fun removeFileMeta(fileUri: String) {
         dataStore.edit { prefs ->
             val current = prefs[KEY_FILE_METADATA] ?: emptySet()
-            prefs[KEY_FILE_METADATA] = current.filter { !it.startsWith("$fileUri\t") }.toSet()
+            prefs[KEY_FILE_METADATA] = current.filter { raw ->
+                if (raw.startsWith("{")) {
+                    runCatching { metaJson.decodeFromString<FileMetaEntry>(raw).uri != fileUri }.getOrDefault(true)
+                } else {
+                    !raw.startsWith("$fileUri\t")
+                }
+            }.toSet()
         }
     }
 }
