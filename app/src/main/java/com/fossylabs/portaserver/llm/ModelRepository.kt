@@ -3,6 +3,8 @@ package com.fossylabs.portaserver.llm
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.DocumentsContract
+import com.fossylabs.portaserver.server.LogLevel
+import com.fossylabs.portaserver.server.LogRepository
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.get
@@ -95,8 +97,9 @@ class ModelRepository(
                         pipelineTag = dto.pipelineTag,
                     )
                 }
-        } catch (_: Exception) {
-            emptyList()
+        } catch (e: Exception) {
+            LogRepository.log(LogLevel.WARN, "Failed to fetch HuggingFace models: ${e.message}")
+            throw e
         }
     }
 
@@ -110,8 +113,9 @@ class ModelRepository(
                 }
                 .body()
             detail.siblings.filter { it.rfilename.endsWith(".gguf", ignoreCase = true) }
-        } catch (_: Exception) {
-            emptyList()
+        } catch (e: Exception) {
+            LogRepository.log(LogLevel.WARN, "Failed to fetch files for $modelId: ${e.message}")
+            throw e
         }
     }
 }

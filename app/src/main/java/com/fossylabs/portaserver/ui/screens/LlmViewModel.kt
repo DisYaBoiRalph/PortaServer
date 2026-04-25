@@ -215,13 +215,18 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     fun fetchHuggingFaceModels() {
         viewModelScope.launch {
             _isFetchingHf.value = true
-            val tier = _modelTier.value
-            _hfModels.value = modelRepository.fetchHuggingFaceModels()
-                .map { model ->
-                    model.copy(isRecommended = tier?.let { ModelRecommender.fitsInTier(model.name, it) } ?: false)
-                }
-                .sortedByDescending { it.isRecommended }
-            _isFetchingHf.value = false
+            try {
+                val tier = _modelTier.value
+                _hfModels.value = modelRepository.fetchHuggingFaceModels()
+                    .map { model ->
+                        model.copy(isRecommended = tier?.let { ModelRecommender.fitsInTier(model.name, it) } ?: false)
+                    }
+                    .sortedByDescending { it.isRecommended }
+            } catch (e: Exception) {
+                _errorMessage.value = "Failed to fetch models: ${e.message}"
+            } finally {
+                _isFetchingHf.value = false
+            }
         }
     }
 
@@ -231,27 +236,32 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         if (model != null) {
             viewModelScope.launch {
                 _isFetchingFiles.value = true
-                val files = modelRepository.fetchModelFiles(model.name)
-                _hfModelFiles.value = files
-                // Persist HF-provided metadata so we can validate local files later
-                for (file in files) {
-                    try {
-                        val size = file.lfs?.size ?: file.size
-                        settingsRepo.saveRemoteFileMeta(model.name, file.rfilename, size, file.lfs?.sha256)
-                    } catch (_: Exception) {
-                    }
-                }
-                _isFetchingFiles.value = false
-                // Pre-populate downloadStates from already-present local models
-                val currentLocals = _localModels.value
-                val prePopulated = buildMap {
+                try {
+                    val files = modelRepository.fetchModelFiles(model.name)
+                    _hfModelFiles.value = files
+                    // Persist HF-provided metadata so we can validate local files later
                     for (file in files) {
-                        val local = currentLocals.firstOrNull { it.name == file.rfilename }
-                        if (local != null) put(file.rfilename, DownloadState(1f, done = true, fileUri = local.path))
+                        try {
+                            val size = file.lfs?.size ?: file.size
+                            settingsRepo.saveRemoteFileMeta(model.name, file.rfilename, size, file.lfs?.sha256)
+                        } catch (_: Exception) {
+                        }
                     }
-                }
-                if (prePopulated.isNotEmpty()) {
-                    _downloadStates.update { current -> prePopulated + current }
+                    // Pre-populate downloadStates from already-present local models
+                    val currentLocals = _localModels.value
+                    val prePopulated = buildMap {
+                        for (file in files) {
+                            val local = currentLocals.firstOrNull { it.name == file.rfilename }
+                            if (local != null) put(file.rfilename, DownloadState(1f, done = true, fileUri = local.path))
+                        }
+                    }
+                    if (prePopulated.isNotEmpty()) {
+                        _downloadStates.update { current -> prePopulated + current }
+                    }
+                } catch (e: Exception) {
+                    _errorMessage.value = "Failed to fetch files for ${model.name}: ${e.message}"
+                } finally {
+                    _isFetchingFiles.value = false
                 }
             }
         }
