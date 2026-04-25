@@ -131,6 +131,10 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     val downloadStates: StateFlow<Map<String, DownloadState>> = _downloadStates.asStateFlow()
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadJobsLock = Any()
+    /** Monotonic counter used to assign unique notification IDs, avoiding hashCode() collisions. */
+    private val notifIdCounter = java.util.concurrent.atomic.AtomicInteger(0)
+    /** fileName → notification ID assigned at download start. */
+    private val notifIds = mutableMapOf<String, Int>()
     private val modelCacheLock = Any()
     private var activeModelCachePaths: Set<String> = emptySet()
 
@@ -309,7 +313,9 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 val digest = expectedSha256?.let { java.security.MessageDigest.getInstance("SHA-256") }
 
                 var totalDownloaded = 0L
-                val notifId = fileName.hashCode()
+                val notifId = synchronized(downloadJobsLock) {
+                    notifIds.getOrPut(fileName) { notifIdCounter.incrementAndGet() }
+                }
                 DownloadNotifier.ensureChannel(getApplication())
                 val startMs = System.currentTimeMillis()
 
@@ -508,7 +514,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     if (actualSha256 != expectedSha256) {
                         DocumentsContract.deleteDocument(resolver, fileUri)
                         _downloadStates.update { it - fileName }
-                        try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
+                        try { DownloadNotifier.cancel(getApplication(), notifId) } catch (_: Exception) {}
                         _errorMessage.value = "Integrity check failed for $fileName"
                         return@launch
                     }
@@ -520,7 +526,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                         downloadedBytes = totalDownloaded, totalBytes = expectedSize, speedBytesPerSec = null
                     ))
                 }
-                try { DownloadNotifier.complete(getApplication(), fileName.hashCode(), fileName) } catch (_: Exception) {}
+                try { DownloadNotifier.complete(getApplication(), notifId, fileName) } catch (_: Exception) {}
                 settingsRepo.saveFileMeta(fileUri.toString(), totalDownloaded, verifiedSha256 ?: expectedSha256)
                 refreshLocalModels()
             } catch (_: CancellationException) {
@@ -528,10 +534,14 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     try { DocumentsContract.deleteDocument(resolver, uri) } catch (_: Exception) {}
                 }
                 _downloadStates.update { it - fileName }
-                try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
+                synchronized(downloadJobsLock) { notifIds.remove(fileName) }?.let { id ->
+                    try { DownloadNotifier.cancel(getApplication(), id) } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 _downloadStates.update { it - fileName }
-                try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
+                synchronized(downloadJobsLock) { notifIds.remove(fileName) }?.let { id ->
+                    try { DownloadNotifier.cancel(getApplication(), id) } catch (_: Exception) {}
+                }
                 createdFileUri?.let { uri ->
                     try { DocumentsContract.deleteDocument(resolver, uri) } catch (_: Exception) {}
                 }
@@ -545,6 +555,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                 if (downloadJobs[fileName] === job) {
                     downloadJobs.remove(fileName)
                 }
+                notifIds.remove(fileName)
             }
         }
     }
@@ -554,8 +565,11 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         if (job != null) {
             job.cancel(CancellationException("Cancelled by user"))
         }
+        val notifId = synchronized(downloadJobsLock) { notifIds.remove(fileName) }
         _downloadStates.update { it - fileName }
-        try { DownloadNotifier.cancel(getApplication(), fileName.hashCode()) } catch (_: Exception) {}
+        if (notifId != null) {
+            try { DownloadNotifier.cancel(getApplication(), notifId) } catch (_: Exception) {}
+        }
     }
 
     fun deleteLocalModel(path: String) {
