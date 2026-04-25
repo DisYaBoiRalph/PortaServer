@@ -13,8 +13,10 @@ import androidx.core.content.ContextCompat
 object DownloadNotifier {
     private const val CHANNEL_ID = "portaserver_downloads"
     private val toastShown = mutableSetOf<Int>()
+    @Volatile private var channelCreated = false
 
     fun ensureChannel(context: Context) {
+        if (channelCreated) return
         val mgr = context.getSystemService(NotificationManager::class.java)
         val existing = mgr.getNotificationChannel(CHANNEL_ID)
         if (existing == null) {
@@ -25,6 +27,7 @@ object DownloadNotifier {
             ).apply { description = "Shows model download progress" }
             mgr.createNotificationChannel(ch)
         }
+        channelCreated = true
     }
 
     private fun notificationsAllowed(context: Context, mgr: NotificationManager): Boolean {
