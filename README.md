@@ -6,9 +6,9 @@ Turn your Android phone into a portable local server — run LLM inference and e
 
 - **LLM Server** — Load and run GGUF models on-device via [llama.cpp](https://github.com/ggerganov/llama.cpp). Exposes an OpenAI-compatible `/v1/chat/completions` endpoint with streaming (SSE) support, usable directly from VS Code extensions, curl, or any OpenAI client.
 - **SQL Server** — Expose a local SQLite database over the network via a REST API.
-- **Model Discovery** — Browse and download models from HuggingFace filtered to what will actually fit in your device's RAM. Swipe to delete downloaded models.
+- **Model Discovery** — Browse and download GGUF text-generation models from HuggingFace. Models are prioritized by a RAM-based fit recommendation, and downloaded models can be removed with swipe-to-delete.
 - **Foreground Service** — The server keeps running in the background with a persistent notification showing the device IP and active ports.
-- **Device-aware recommendations** — Models are ranked based on your device's RAM, CPU cores, and SoC.
+- **Device-aware recommendations** — Recommendations are RAM-tier based; CPU cores and SoC are surfaced in the UI for quick device context.
 
 ## API
 
