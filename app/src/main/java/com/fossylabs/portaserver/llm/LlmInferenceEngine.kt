@@ -26,6 +26,13 @@ object LlmInferenceEngine {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    /**
+     * True while a load or generation holds the engine. Callers use this to reject work
+     * immediately rather than queueing on [mutex] and holding a connection open for the
+     * duration of somebody else's generation.
+     */
+    val isBusy: Boolean get() = mutex.isLocked
+
     suspend fun loadModel(
         modelPath: String,
         nCtx: Int = 2048,

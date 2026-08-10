@@ -1,10 +1,12 @@
 package com.fossylabs.portaserver.llm
 
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.response.header
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
@@ -143,6 +145,28 @@ private suspend fun ApplicationCall.readyModelName(): String? {
             HttpStatusCode.ServiceUnavailable,
             mapOf("error" to mapOf("message" to "No model loaded", "type" to "server_error")),
         )
+        return null
+    }
+    if (LlmInferenceEngine.isBusy) {
+        // A load in flight is a transient server state; a generation in flight is a
+        // capacity limit. Clients back off differently for the two, so distinguish them.
+        if (LlmInferenceEngine.isLoading.value) {
+            respond(
+                HttpStatusCode.ServiceUnavailable,
+                mapOf("error" to mapOf("message" to "Model is loading", "type" to "server_error")),
+            )
+        } else {
+            response.header(HttpHeaders.RetryAfter, "1")
+            respond(
+                HttpStatusCode.TooManyRequests,
+                mapOf(
+                    "error" to mapOf(
+                        "message" to "Model is busy with another request",
+                        "type" to "rate_limit_error",
+                    )
+                ),
+            )
+        }
         return null
     }
     return loadedModel.name
