@@ -14,6 +14,8 @@ data class ModelInfo(
     val likes: Int? = null,
     val isCorrupted: Boolean = false,
     val pipelineTag: String? = null,
+    /** File size in bytes when known; drives the [MemoryGuard] estimate. */
+    val sizeBytes: Long? = null,
 )
 
 data class DeviceSpecs(

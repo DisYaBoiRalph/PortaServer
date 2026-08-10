@@ -48,6 +48,7 @@ class ModelRepository(
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE,
             ),
             null, null, null,
         ) ?: return results
@@ -57,11 +58,16 @@ class ModelRepository(
                 val name = it.getString(0) ?: continue
                 val docId = it.getString(1) ?: continue
                 val mimeType = it.getString(2)
+                val sizeBytes = if (it.isNull(3)) null else it.getLong(3)
 
                 when {
                     name.endsWith(".gguf", ignoreCase = true) -> {
                         val fileUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, docId)
-                        results += ModelInfo(path = fileUri.toString(), name = name)
+                        results += ModelInfo(
+                            path = fileUri.toString(),
+                            name = name,
+                            sizeBytes = sizeBytes,
+                        )
                     }
                     mimeType == DocumentsContract.Document.MIME_TYPE_DIR -> {
                         val subUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, docId)

@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarOutline
 import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -51,6 +52,7 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -74,6 +76,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fossylabs.portaserver.llm.DownloadState
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
+import com.fossylabs.portaserver.llm.MemoryGuard
 import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
 import com.fossylabs.portaserver.llm.ModelTier
@@ -98,6 +101,32 @@ fun LlmScreen(
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val selectedHfModel by viewModel.selectedHfModel.collectAsStateWithLifecycle()
     val hfModelFiles by viewModel.hfModelFiles.collectAsStateWithLifecycle()
+
+    // A load the user must confirm because it is projected to strain device memory.
+    var pendingLoad by remember { mutableStateOf<PendingMemoryLoad?>(null) }
+
+    // Both load entry points funnel through here so the guard cannot be bypassed by one.
+    fun requestLoad(path: String) {
+        val specs = deviceSpecs
+        val sizeBytes = localModels.firstOrNull { it.path == path }?.sizeBytes
+        val verdict = if (specs == null) {
+            MemoryGuard.Verdict.OK
+        } else {
+            MemoryGuard.evaluate(specs, sizeBytes, GUARD_CONTEXT_TOKENS)
+        }
+        if (verdict == MemoryGuard.Verdict.OK) {
+            viewModel.loadModel(path)
+        } else {
+            pendingLoad = PendingMemoryLoad(
+                path = path,
+                verdict = verdict,
+                estimatedPeakBytes = MemoryGuard.estimatePeakBytes(
+                    sizeBytes ?: 0L, GUARD_CONTEXT_TOKENS,
+                ),
+                totalRamBytes = specs?.totalRamBytes ?: 0L,
+            )
+        }
+    }
     val isFetchingFiles by viewModel.isFetchingFiles.collectAsStateWithLifecycle()
     val downloadStates by viewModel.downloadStates.collectAsStateWithLifecycle()
     val localIp by viewModel.localIp.collectAsStateWithLifecycle()
@@ -390,7 +419,7 @@ fun LlmScreen(
                         isLoaded = isLoaded,
                         isLoading = isLoadingModel,
                         downloadState = downloadStates[model.name],
-                        onLoad = { viewModel.loadModel(model.path) },
+                        onLoad = { requestLoad(model.path) },
                         onUnload = viewModel::unloadModel,
                     )
                 }
@@ -463,10 +492,72 @@ fun LlmScreen(
             },
             onCancelDownload = viewModel::cancelDownload,
             onAddDirectory = { dirPickerLauncher.launch(null) },
-            onLoad = { fileUri -> viewModel.loadModel(fileUri) },
+            onLoad = { fileUri -> requestLoad(fileUri) },
             onUnload = viewModel::unloadModel,
         )
     }
+
+    pendingLoad?.let { pending ->
+        MemoryWarningDialog(
+            pending = pending,
+            onProceed = {
+                pendingLoad = null
+                viewModel.loadModel(pending.path)
+            },
+            onDismiss = { pendingLoad = null },
+        )
+    }
+}
+
+/**
+ * Context length the memory estimate assumes. Matches [LlmInferenceEngine]'s default.
+ */
+private const val GUARD_CONTEXT_TOKENS = 2048
+
+/** A load held back pending user confirmation, with the numbers behind the warning. */
+private data class PendingMemoryLoad(
+    val path: String,
+    val verdict: MemoryGuard.Verdict,
+    val estimatedPeakBytes: Long,
+    val totalRamBytes: Long,
+)
+
+@Composable
+private fun MemoryWarningDialog(
+    pending: PendingMemoryLoad,
+    onProceed: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val exceeds = pending.verdict == MemoryGuard.Verdict.EXCEEDS
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (exceeds) "Not enough memory" else "Memory will be tight") },
+        text = {
+            Text(
+                buildString {
+                    append("This model needs roughly ")
+                    append(formatFileSize(pending.estimatedPeakBytes))
+                    append(" of the ")
+                    append(formatFileSize(pending.totalRamBytes))
+                    append(" on this device.\n\n")
+                    append(
+                        if (exceeds) {
+                            "Loading it will most likely be cut short by the system. Try a smaller model or a lower quantisation."
+                        } else {
+                            "It should load, but little is left for the system and other apps."
+                        }
+                    )
+                    append("\n\nThis is an estimate based on file size and context length.")
+                }
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onProceed) { Text("Load anyway") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 private fun needsNotificationPermission(context: Context): Boolean {

@@ -16,8 +16,18 @@ class DeviceSpecsReader(private val context: Context) {
             Build.SOC_MODEL.takeIf { it.isNotBlank() && it != Build.UNKNOWN }
         } else null
 
+        // totalMem excludes memory reserved by the kernel and firmware, so it reads well
+        // below the RAM the device is sold with (an 8 GB phone reports ~7.5 GiB).
+        // advertisedMem reports the nominal figure, which is what tier advice is written
+        // against; ModelRecommender's thresholds assume this value.
+        val totalRamBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            memInfo.advertisedMem
+        } else {
+            memInfo.totalMem
+        }
+
         return DeviceSpecs(
-            totalRamBytes = memInfo.totalMem,
+            totalRamBytes = totalRamBytes,
             availableRamBytes = memInfo.availMem,
             cpuCores = Runtime.getRuntime().availableProcessors(),
             socModel = socModel,

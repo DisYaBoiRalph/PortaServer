@@ -2,12 +2,19 @@ package com.fossylabs.portaserver.llm
 
 object ModelRecommender {
 
+    /**
+     * Thresholds are written against advertised RAM (see [DeviceSpecsReader]), which reads
+     * about 0.5 GB higher than the older totalMem figure. The boundaries below are set so
+     * a nominal 8 GB device still lands on 7B rather than being promoted to 13B — a tier
+     * that device cannot honour and that [MemoryGuard] would immediately warn against.
+     */
     fun recommend(specs: DeviceSpecs): ModelTier = when {
-        specs.totalRamGb < 4f  -> ModelTier(3f,  "Q4_K_M", "Up to 3B params (Q4_K_M)")
-        specs.totalRamGb < 6f  -> ModelTier(7f,  "Q4_K_M", "Up to 7B params (Q4_K_M)")
-        specs.totalRamGb < 8f  -> ModelTier(7f,  "Q5_K_S", "Up to 7B params (Q5_K_S)")
-        specs.totalRamGb < 12f -> ModelTier(13f, "Q4_K_M", "Up to 13B params (Q4_K_M)")
-        else                   -> ModelTier(13f, "Q5_K_M", "13B+ or 7B high-quality quant")
+        specs.totalRamGb < 4f   -> ModelTier(3f,  "Q4_K_M", "Up to 3B params (Q4_K_M)")
+        specs.totalRamGb < 6f   -> ModelTier(3f,  "Q5_K_M", "Up to 3B params (Q5_K_M)")
+        specs.totalRamGb < 8.5f -> ModelTier(7f,  "Q4_K_M", "Up to 7B params (Q4_K_M)")
+        specs.totalRamGb < 12f  -> ModelTier(7f,  "Q5_K_M", "Up to 7B params (Q5_K_M)")
+        specs.totalRamGb < 16f  -> ModelTier(13f, "Q4_K_M", "Up to 13B params (Q4_K_M)")
+        else                    -> ModelTier(13f, "Q5_K_M", "13B+ or 7B high-quality quant")
     }
 
     /** Returns true if a model's filename plausibly fits within the tier. */
