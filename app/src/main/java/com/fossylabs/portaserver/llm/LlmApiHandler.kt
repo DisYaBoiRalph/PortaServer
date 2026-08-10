@@ -2,9 +2,11 @@ package com.fossylabs.portaserver.llm
 
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytesWriter
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -13,6 +15,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private val apiJson = Json { ignoreUnknownKeys = true }
+
+private const val DEFAULT_MAX_TOKENS = 512
 
 fun Route.llmRoutes() {
 
@@ -51,69 +55,136 @@ fun Route.llmRoutes() {
 
     post("/v1/chat/completions") {
         val request = call.receive<ChatCompletionRequest>()
+        val modelName = call.readyModelName() ?: return@post
 
-        if (LlmInferenceEngine.loadedModel.value == null) {
-            call.respond(
-                HttpStatusCode.ServiceUnavailable,
-                mapOf("error" to mapOf("message" to "No model loaded", "type" to "server_error"))
-            )
-            return@post
-        }
-
-        val messages = request.messages.map { ChatMessage(it.role, it.content) }
-        val maxTokens = request.maxTokens ?: 512
-        val temperature = request.temperature
-        val topP = request.topP
-        val modelName = LlmInferenceEngine.loadedModel.value!!.name
         val requestId = "chatcmpl-${System.currentTimeMillis()}"
         val created = System.currentTimeMillis() / 1_000L
 
-        if (request.stream == true) {
-            call.respondBytesWriter(
-                contentType = ContentType.parse("text/event-stream; charset=utf-8"),
-                status = HttpStatusCode.OK,
-            ) {
-                // Send initial role delta
-                val roleDelta = apiJson.encodeToString(
+        call.respondGeneration(
+            messages = request.messages.map { ChatMessage(it.role, it.content) },
+            maxTokens = request.maxTokens ?: DEFAULT_MAX_TOKENS,
+            temperature = request.temperature,
+            topP = request.topP,
+            stream = request.stream == true,
+            // The chat stream opens with a role-only delta before any content.
+            primer = apiJson.encodeToString(
+                ChatCompletionChunk(
+                    id = requestId, created = created, model = modelName,
+                    choices = listOf(CompletionChoice(delta = CompletionDelta(role = "assistant"))),
+                )
+            ),
+            encodeChunk = { token ->
+                apiJson.encodeToString(
                     ChatCompletionChunk(
                         id = requestId, created = created, model = modelName,
-                        choices = listOf(CompletionChoice(delta = CompletionDelta(role = "assistant")))
+                        choices = listOf(CompletionChoice(delta = CompletionDelta(content = token))),
                     )
                 )
-                writeStringUtf8("data: $roleDelta\n\n")
-                flush()
-
-                LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { token ->
-                    val chunk = apiJson.encodeToString(
-                        ChatCompletionChunk(
-                            id = requestId, created = created, model = modelName,
-                            choices = listOf(CompletionChoice(delta = CompletionDelta(content = token)))
-                        )
+            },
+            encodeFinal = { text ->
+                apiJson.encodeToString(
+                    ChatCompletionResponse(
+                        id = requestId, created = created, model = modelName,
+                        choices = listOf(
+                            CompletionChoice(
+                                message = CompletionMessage(role = "assistant", content = text),
+                                finishReason = "stop",
+                            )
+                        ),
                     )
-                    writeStringUtf8("data: $chunk\n\n")
-                    flush()
-                }
-
-                writeStringUtf8("data: [DONE]\n\n")
-                flush()
-            }
-        } else {
-            val sb = StringBuilder()
-            LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { sb.append(it) }
-            call.respond(
-                ChatCompletionResponse(
-                    id = requestId,
-                    created = created,
-                    model = modelName,
-                    choices = listOf(
-                        CompletionChoice(
-                            message = CompletionMessage(role = "assistant", content = sb.toString()),
-                            finishReason = "stop",
-                        )
-                    ),
                 )
-            )
-        }
+            },
+        )
+    }
+
+    post("/v1/completions") {
+        val request = call.receive<CompletionRequest>()
+        val modelName = call.readyModelName() ?: return@post
+
+        val requestId = "cmpl-${System.currentTimeMillis()}"
+        val created = System.currentTimeMillis() / 1_000L
+
+        call.respondGeneration(
+            // The legacy API has no roles; the prompt is passed through verbatim so the
+            // model's chat template does not wrap a fill-in-the-middle request in turns.
+            messages = listOf(ChatMessage(role = "user", content = request.prompt)),
+            maxTokens = request.maxTokens ?: DEFAULT_MAX_TOKENS,
+            temperature = request.temperature,
+            topP = request.topP,
+            stream = request.stream == true,
+            encodeChunk = { token ->
+                apiJson.encodeToString(
+                    CompletionResponse(
+                        id = requestId, created = created, model = modelName,
+                        choices = listOf(TextCompletionChoice(text = token)),
+                    )
+                )
+            },
+            encodeFinal = { text ->
+                apiJson.encodeToString(
+                    CompletionResponse(
+                        id = requestId, created = created, model = modelName,
+                        choices = listOf(TextCompletionChoice(text = text, finishReason = "stop")),
+                    )
+                )
+            },
+        )
     }
 }
 
+/**
+ * Returns the loaded model's name, or responds with an error and returns null when the
+ * server cannot serve a generation right now.
+ */
+private suspend fun ApplicationCall.readyModelName(): String? {
+    val loadedModel = LlmInferenceEngine.loadedModel.value
+    if (loadedModel == null) {
+        respond(
+            HttpStatusCode.ServiceUnavailable,
+            mapOf("error" to mapOf("message" to "No model loaded", "type" to "server_error")),
+        )
+        return null
+    }
+    return loadedModel.name
+}
+
+/**
+ * Runs generation and writes either an SSE stream or a single JSON body.
+ *
+ * [primer] is an optional SSE event emitted before any token, [encodeChunk] serializes
+ * one streamed token, and [encodeFinal] builds the non-streaming body. Callers supply
+ * these so the chat and legacy-completion routes share the streaming mechanics without
+ * sharing a wire format.
+ */
+private suspend fun ApplicationCall.respondGeneration(
+    messages: List<ChatMessage>,
+    maxTokens: Int,
+    temperature: Float?,
+    topP: Float?,
+    stream: Boolean,
+    primer: String? = null,
+    encodeChunk: (token: String) -> String,
+    encodeFinal: (text: String) -> String,
+) {
+    if (stream) {
+        respondBytesWriter(
+            contentType = ContentType.parse("text/event-stream; charset=utf-8"),
+            status = HttpStatusCode.OK,
+        ) {
+            if (primer != null) {
+                writeStringUtf8("data: $primer\n\n")
+                flush()
+            }
+            LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { token ->
+                writeStringUtf8("data: ${encodeChunk(token)}\n\n")
+                flush()
+            }
+            writeStringUtf8("data: [DONE]\n\n")
+            flush()
+        }
+    } else {
+        val sb = StringBuilder()
+        LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { sb.append(it) }
+        respondText(encodeFinal(sb.toString()), ContentType.Application.Json)
+    }
+}

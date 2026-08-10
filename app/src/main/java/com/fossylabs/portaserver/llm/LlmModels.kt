@@ -95,6 +95,36 @@ data class ChatCompletionChunk(
     val choices: List<CompletionChoice>,
 )
 
+// Legacy text-completions API. Autocomplete clients (e.g. Continue with
+// useLegacyCompletionsEndpoint) call this instead of /v1/chat/completions.
+// OpenAI allows `prompt` to be a string or an array; only strings are supported.
+@Serializable
+data class CompletionRequest(
+    val model: String = "",
+    val prompt: String,
+    @SerialName("max_tokens") val maxTokens: Int? = null,
+    val stream: Boolean? = null,
+    val temperature: Float? = null,
+    @SerialName("top_p") val topP: Float? = null,
+)
+
+/** Serves as both the non-streaming body and the streamed chunk, as OpenAI does. */
+@Serializable
+data class CompletionResponse(
+    val id: String,
+    val `object`: String = "text_completion",
+    val created: Long,
+    val model: String,
+    val choices: List<TextCompletionChoice>,
+)
+
+@Serializable
+data class TextCompletionChoice(
+    val index: Int = 0,
+    val text: String,
+    @SerialName("finish_reason") val finishReason: String? = null,
+)
+
 @Serializable
 data class ModelsListResponse(
     val `object`: String = "list",
