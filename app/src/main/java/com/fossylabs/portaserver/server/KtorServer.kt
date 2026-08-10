@@ -2,6 +2,8 @@ package com.fossylabs.portaserver.server
 
 import com.fossylabs.portaserver.llm.llmRoutes
 import com.fossylabs.portaserver.sql.sqlRoutes
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCallPipeline
@@ -12,6 +14,7 @@ import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.routing
 
@@ -44,6 +47,16 @@ class KtorServer(
     /** Shared plugin/monitoring setup applied identically to both engines. */
     private fun Application.configure(label: String, routes: Route.() -> Unit) {
         install(ContentNegotiation) { json() }
+        // The server is reached from arbitrary origins — browser front-ends, web-based
+        // playgrounds, and tunnelled clients — none of which are known ahead of time.
+        install(CORS) {
+            anyHost()
+            allowMethod(HttpMethod.Get)
+            allowMethod(HttpMethod.Post)
+            allowMethod(HttpMethod.Options)
+            allowHeader(HttpHeaders.ContentType)
+            allowHeader(HttpHeaders.Authorization)
+        }
         intercept(ApplicationCallPipeline.Monitoring) {
             onRequestReceived()
             LogRepository.log(
