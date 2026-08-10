@@ -16,7 +16,18 @@ import io.ktor.utils.io.writeStringUtf8
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-private val apiJson = Json { ignoreUnknownKeys = true }
+// Both flags are load-bearing for OpenAI wire compatibility:
+//   encodeDefaults  — `object` and `index` carry default values and clients expect them
+//                     on every response and chunk. Ktor's ContentNegotiation Json sets
+//                     this, so bodies built here must too or they omit those fields.
+//   explicitNulls   — the choice type covers both chat and streaming shapes, so its
+//                     unused half is null. OpenAI omits null fields rather than sending
+//                     `"delta":null`, and strict clients reject the difference.
+private val apiJson = Json {
+    ignoreUnknownKeys = true
+    encodeDefaults = true
+    explicitNulls = false
+}
 
 fun Route.llmRoutes() {
 
