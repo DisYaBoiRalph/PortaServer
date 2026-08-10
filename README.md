@@ -83,3 +83,9 @@ app/src/main/
 │   ├── sql/                # SQLite manager + REST routes
 │   └── ui/                 # Compose screens and ViewModels
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+PortaServer derives code from [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery) and [mobile-server](https://github.com/techjarves/mobile-server), both Apache-2.0. See [NOTICE](NOTICE) for attribution.

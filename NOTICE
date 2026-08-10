@@ -1,0 +1,47 @@
+PortaServer
+Copyright 2026 FossyLabs
+
+This product includes software developed at FossyLabs, licensed under the
+Apache License, Version 2.0 (see the LICENSE file).
+
+================================================================================
+Third-party code
+================================================================================
+
+Portions of this software are derived from the following Apache-2.0 licensed
+projects. Files containing derived code retain their original copyright headers
+alongside a comment identifying their origin.
+
+--------------------------------------------------------------------------------
+Google AI Edge Gallery
+https://github.com/google-ai-edge/gallery
+Copyright 2025-2026 Google LLC
+Licensed under the Apache License, Version 2.0
+
+--------------------------------------------------------------------------------
+mobile-server
+https://github.com/techjarves/mobile-server
+Licensed under the Apache License, Version 2.0
+
+A fork of Google AI Edge Gallery adding an embedded OpenAI-compatible server and
+public tunneling. PortaServer derives its Cloudflare tunnel integration and
+parts of its OpenAI-compatible HTTP surface from this project.
+
+================================================================================
+Bundled binaries
+================================================================================
+
+Release builds bundle the `cloudflared` client, downloaded at build time and not
+redistributed in this repository.
+
+cloudflared
+https://github.com/cloudflare/cloudflared
+Copyright Cloudflare, Inc.
+Licensed under the Apache License, Version 2.0
+
+================================================================================
+Dependencies
+================================================================================
+
+llama.cpp (https://github.com/ggerganov/llama.cpp) is fetched at build time and
+is licensed under the MIT License, Copyright (c) 2023-2026 The ggml authors.
