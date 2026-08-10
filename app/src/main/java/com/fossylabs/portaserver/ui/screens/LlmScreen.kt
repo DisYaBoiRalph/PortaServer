@@ -102,6 +102,10 @@ fun LlmScreen(
     val selectedHfModel by viewModel.selectedHfModel.collectAsStateWithLifecycle()
     val hfModelFiles by viewModel.hfModelFiles.collectAsStateWithLifecycle()
 
+    val isFetchingFiles by viewModel.isFetchingFiles.collectAsStateWithLifecycle()
+    val downloadStates by viewModel.downloadStates.collectAsStateWithLifecycle()
+    val localIp by viewModel.localIp.collectAsStateWithLifecycle()
+
     // A load the user must confirm because it is projected to strain device memory.
     var pendingLoad by remember { mutableStateOf<PendingMemoryLoad?>(null) }
 
@@ -112,7 +116,7 @@ fun LlmScreen(
         val verdict = if (specs == null) {
             MemoryGuard.Verdict.OK
         } else {
-            MemoryGuard.evaluate(specs, sizeBytes, GUARD_CONTEXT_TOKENS)
+            MemoryGuard.evaluate(specs, sizeBytes, settings.nCtx)
         }
         if (verdict == MemoryGuard.Verdict.OK) {
             viewModel.loadModel(path)
@@ -121,15 +125,12 @@ fun LlmScreen(
                 path = path,
                 verdict = verdict,
                 estimatedPeakBytes = MemoryGuard.estimatePeakBytes(
-                    sizeBytes ?: 0L, GUARD_CONTEXT_TOKENS,
+                    sizeBytes ?: 0L, settings.nCtx,
                 ),
                 totalRamBytes = specs?.totalRamBytes ?: 0L,
             )
         }
     }
-    val isFetchingFiles by viewModel.isFetchingFiles.collectAsStateWithLifecycle()
-    val downloadStates by viewModel.downloadStates.collectAsStateWithLifecycle()
-    val localIp by viewModel.localIp.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -508,11 +509,6 @@ fun LlmScreen(
         )
     }
 }
-
-/**
- * Context length the memory estimate assumes. Matches [LlmInferenceEngine]'s default.
- */
-private const val GUARD_CONTEXT_TOKENS = 2048
 
 /** A load held back pending user confirmation, with the numbers behind the warning. */
 private data class PendingMemoryLoad(

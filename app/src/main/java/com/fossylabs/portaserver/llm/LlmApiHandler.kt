@@ -18,8 +18,6 @@ import kotlinx.serialization.json.Json
 
 private val apiJson = Json { ignoreUnknownKeys = true }
 
-private const val DEFAULT_MAX_TOKENS = 512
-
 fun Route.llmRoutes() {
 
     get("/health") {
@@ -64,9 +62,9 @@ fun Route.llmRoutes() {
 
         call.respondGeneration(
             messages = request.messages.map { ChatMessage(it.role, it.content) },
-            maxTokens = request.maxTokens ?: DEFAULT_MAX_TOKENS,
-            temperature = request.temperature,
-            topP = request.topP,
+            maxTokens = request.maxTokens ?: InferenceDefaults.maxTokens,
+            temperature = request.temperature ?: InferenceDefaults.temperature,
+            topP = request.topP ?: InferenceDefaults.topP,
             stream = request.stream == true,
             // The chat stream opens with a role-only delta before any content.
             primer = apiJson.encodeToString(
@@ -110,9 +108,9 @@ fun Route.llmRoutes() {
             // The legacy API has no roles; the prompt is passed through verbatim so the
             // model's chat template does not wrap a fill-in-the-middle request in turns.
             messages = listOf(ChatMessage(role = "user", content = request.prompt)),
-            maxTokens = request.maxTokens ?: DEFAULT_MAX_TOKENS,
-            temperature = request.temperature,
-            topP = request.topP,
+            maxTokens = request.maxTokens ?: InferenceDefaults.maxTokens,
+            temperature = request.temperature ?: InferenceDefaults.temperature,
+            topP = request.topP ?: InferenceDefaults.topP,
             stream = request.stream == true,
             encodeChunk = { token ->
                 apiJson.encodeToString(

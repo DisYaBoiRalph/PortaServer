@@ -10,11 +10,15 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.fossylabs.portaserver.MainActivity
+import com.fossylabs.portaserver.llm.InferenceDefaults
 import com.fossylabs.portaserver.server.InactivityWatcher
 import com.fossylabs.portaserver.server.KtorServer
 import com.fossylabs.portaserver.server.LogLevel
 import com.fossylabs.portaserver.server.LogRepository
 import com.fossylabs.portaserver.server.ServerManager
+import com.fossylabs.portaserver.settings.DEFAULT_MAX_TOKENS
+import com.fossylabs.portaserver.settings.DEFAULT_TEMPERATURE
+import com.fossylabs.portaserver.settings.DEFAULT_TOP_P
 import com.fossylabs.portaserver.sql.SqliteManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +55,13 @@ class ServerForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+
+        // Applied before the server binds so the first request cannot race the defaults.
+        InferenceDefaults.configure(
+            maxTokens = intent?.getIntExtra(EXTRA_MAX_TOKENS, DEFAULT_MAX_TOKENS) ?: DEFAULT_MAX_TOKENS,
+            temperature = intent?.getFloatExtra(EXTRA_TEMPERATURE, DEFAULT_TEMPERATURE) ?: DEFAULT_TEMPERATURE,
+            topP = intent?.getFloatExtra(EXTRA_TOP_P, DEFAULT_TOP_P) ?: DEFAULT_TOP_P,
+        )
 
         if (server == null) {
             server = KtorServer(llmPort, sqlPort, inactivityWatcher::recordRequest).also { it.start() }
@@ -131,6 +142,9 @@ class ServerForegroundService : Service() {
         const val EXTRA_SQL_PORT = "sql_port"
         const val EXTRA_TIMEOUT_MS = "timeout_ms"
         const val EXTRA_MODEL_NAME = "model_name"
+        const val EXTRA_MAX_TOKENS = "max_tokens"
+        const val EXTRA_TEMPERATURE = "temperature"
+        const val EXTRA_TOP_P = "top_p"
         const val DEFAULT_LLM_PORT = 8080
         const val DEFAULT_SQL_PORT = 8181
         private const val ACTION_STOP = "com.fossylabs.portaserver.ACTION_STOP"

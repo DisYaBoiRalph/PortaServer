@@ -60,6 +60,11 @@ fun SettingsScreen(
     var sqlPortValue by remember { mutableStateOf(settings.sqlPort.toString()) }
     var hfTokenValue by remember { mutableStateOf(settings.hfToken.orEmpty()) }
     var hfTokenVisible by remember { mutableStateOf(false) }
+    var nCtxValue by remember { mutableStateOf(settings.nCtx.toString()) }
+    var nThreadsValue by remember { mutableStateOf(settings.nThreads.toString()) }
+    var temperatureValue by remember { mutableStateOf(settings.temperature.toString()) }
+    var topPValue by remember { mutableStateOf(settings.topP.toString()) }
+    var maxTokensValue by remember { mutableStateOf(settings.maxTokens.toString()) }
 
     LaunchedEffect(settings.inactivityTimeoutMinutes) {
         timeoutFieldValue = settings.inactivityTimeoutMinutes?.toString() ?: ""
@@ -71,6 +76,11 @@ fun SettingsScreen(
             hfTokenValue = settings.hfToken.orEmpty()
         }
     }
+    LaunchedEffect(settings.nCtx) { nCtxValue = settings.nCtx.toString() }
+    LaunchedEffect(settings.nThreads) { nThreadsValue = settings.nThreads.toString() }
+    LaunchedEffect(settings.temperature) { temperatureValue = settings.temperature.toString() }
+    LaunchedEffect(settings.topP) { topPValue = settings.topP.toString() }
+    LaunchedEffect(settings.maxTokens) { maxTokensValue = settings.maxTokens.toString() }
     LaunchedEffect(settings.llmPort) { llmPortValue = settings.llmPort.toString() }
     LaunchedEffect(settings.sqlPort) { sqlPortValue = settings.sqlPort.toString() }
 
@@ -175,6 +185,65 @@ fun SettingsScreen(
                 )
             }
 
+            item { SettingsSectionHeader("Inference") }
+
+            item {
+                Text(
+                    "Context and threads apply the next time a model is loaded. " +
+                        "Temperature, top-p, and max tokens are defaults that a request can override.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+
+            item {
+                NumberSettingField(
+                    value = nCtxValue,
+                    onValueChange = { nCtxValue = it },
+                    onCommit = { it.toIntOrNull()?.takeIf { v -> v in 128..131072 }?.let(viewModel::setNCtx) },
+                    label = "Context length (tokens)",
+                )
+            }
+
+            item {
+                NumberSettingField(
+                    value = nThreadsValue,
+                    onValueChange = { nThreadsValue = it },
+                    onCommit = { it.toIntOrNull()?.takeIf { v -> v in 0..64 }?.let(viewModel::setNThreads) },
+                    label = "Threads (0 = auto)",
+                )
+            }
+
+            item {
+                NumberSettingField(
+                    value = maxTokensValue,
+                    onValueChange = { maxTokensValue = it },
+                    onCommit = { it.toIntOrNull()?.takeIf { v -> v in 1..32768 }?.let(viewModel::setMaxTokens) },
+                    label = "Default max tokens",
+                )
+            }
+
+            item {
+                NumberSettingField(
+                    value = temperatureValue,
+                    onValueChange = { temperatureValue = it },
+                    onCommit = { it.toFloatOrNull()?.takeIf { v -> v in 0f..2f }?.let(viewModel::setTemperature) },
+                    label = "Default temperature",
+                    decimal = true,
+                )
+            }
+
+            item {
+                NumberSettingField(
+                    value = topPValue,
+                    onValueChange = { topPValue = it },
+                    onCommit = { it.toFloatOrNull()?.takeIf { v -> v in 0f..1f }?.let(viewModel::setTopP) },
+                    label = "Default top-p",
+                    decimal = true,
+                )
+            }
+
             item { SettingsSectionHeader("HuggingFace") }
 
             item {
@@ -275,6 +344,32 @@ fun SettingsScreen(
             }
         }
     }
+}
+
+/** Numeric settings field that only commits values passing [onCommit]'s own range check. */
+@Composable
+private fun NumberSettingField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onCommit: (String) -> Unit,
+    label: String,
+    decimal: Boolean = false,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = {
+            onValueChange(it)
+            onCommit(it)
+        },
+        label = { Text(label) },
+        keyboardOptions = KeyboardOptions(
+            keyboardType = if (decimal) KeyboardType.Decimal else KeyboardType.Number,
+        ),
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+    )
 }
 
 @Composable

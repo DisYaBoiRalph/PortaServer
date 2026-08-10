@@ -80,7 +80,18 @@ class SqlViewModel(application: Application) : AndroidViewModel(application) {
     fun startServer() {
         val s = settings.value
         val timeoutMs = s.inactivityTimeoutMinutes?.let { it.toLong() * 60_000L }
-        ServerManager.start(getApplication(), s.llmPort, s.sqlPort, timeoutMs)
+        // Starting from the SQL screen brings up the LLM engine too, so the inference
+        // defaults still have to be passed — otherwise they would silently fall back to
+        // the built-in constants and discard whatever the user configured.
+        ServerManager.start(
+            context = getApplication(),
+            llmPort = s.llmPort,
+            sqlPort = s.sqlPort,
+            timeoutMs = timeoutMs,
+            maxTokens = s.maxTokens,
+            temperature = s.temperature,
+            topP = s.topP,
+        )
     }
 
     fun stopServer() {

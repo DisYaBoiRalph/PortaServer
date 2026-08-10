@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -39,7 +40,29 @@ data class SettingsState(
     val hfFileMetadata: Map<String, FileMeta> = emptyMap(),
     /** HuggingFace access token, required for gated repos. Null when unset. */
     val hfToken: String? = null,
-)
+    // ── Inference ────────────────────────────────────────────────────────────
+    /** Context window, in tokens. Load-time: a reload is required to apply. */
+    val nCtx: Int = DEFAULT_N_CTX,
+    /** Inference threads, or 0 to derive from the CPU core count. Load-time. */
+    val nThreads: Int = 0,
+    /** Default sampling temperature; per-request values override it. */
+    val temperature: Float = DEFAULT_TEMPERATURE,
+    /** Default nucleus-sampling cutoff; per-request values override it. */
+    val topP: Float = DEFAULT_TOP_P,
+    /** Default response cap in tokens; per-request max_tokens overrides it. */
+    val maxTokens: Int = DEFAULT_MAX_TOKENS,
+) {
+    /** Resolves [nThreads], substituting the derived default when set to auto. */
+    fun resolvedThreads(availableCores: Int): Int =
+        if (nThreads > 0) nThreads else maxOf(1, availableCores / 2)
+}
+
+// Defaults match the values these settings replaced, so behaviour is unchanged
+// until a user edits them.
+const val DEFAULT_N_CTX = 2048
+const val DEFAULT_TEMPERATURE = 0.7f
+const val DEFAULT_TOP_P = 0.9f
+const val DEFAULT_MAX_TOKENS = 512
 
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -53,6 +76,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val KEY_FILE_METADATA = stringSetPreferencesKey("file_metadata")
         val KEY_HF_FILE_METADATA = stringSetPreferencesKey("hf_file_metadata")
         val KEY_HF_TOKEN = stringPreferencesKey("hf_token")
+        val KEY_N_CTX = intPreferencesKey("n_ctx")
+        val KEY_N_THREADS = intPreferencesKey("n_threads")
+        val KEY_TEMPERATURE = floatPreferencesKey("temperature")
+        val KEY_TOP_P = floatPreferencesKey("top_p")
+        val KEY_MAX_TOKENS = intPreferencesKey("max_tokens")
         const val TIMEOUT_DISABLED = -1
     }
 
@@ -66,6 +94,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             scanDirectories = prefs[KEY_SCAN_DIRS] ?: emptySet(),
             downloadDirectory = prefs[KEY_DOWNLOAD_DIR],
             hfToken = prefs[KEY_HF_TOKEN]?.takeIf { it.isNotBlank() },
+            nCtx = prefs[KEY_N_CTX] ?: DEFAULT_N_CTX,
+            nThreads = prefs[KEY_N_THREADS] ?: 0,
+            temperature = prefs[KEY_TEMPERATURE] ?: DEFAULT_TEMPERATURE,
+            topP = prefs[KEY_TOP_P] ?: DEFAULT_TOP_P,
+            maxTokens = prefs[KEY_MAX_TOKENS] ?: DEFAULT_MAX_TOKENS,
             fileMetadata = (prefs[KEY_FILE_METADATA] ?: emptySet()).mapNotNull { raw ->
                 runCatching {
                     if (raw.startsWith("{")) {
@@ -133,6 +166,26 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setDownloadDirectory(uriString: String) {
         dataStore.edit { it[KEY_DOWNLOAD_DIR] = uriString }
+    }
+
+    suspend fun setNCtx(value: Int) {
+        dataStore.edit { it[KEY_N_CTX] = value }
+    }
+
+    suspend fun setNThreads(value: Int) {
+        dataStore.edit { it[KEY_N_THREADS] = value }
+    }
+
+    suspend fun setTemperature(value: Float) {
+        dataStore.edit { it[KEY_TEMPERATURE] = value }
+    }
+
+    suspend fun setTopP(value: Float) {
+        dataStore.edit { it[KEY_TOP_P] = value }
+    }
+
+    suspend fun setMaxTokens(value: Int) {
+        dataStore.edit { it[KEY_MAX_TOKENS] = value }
     }
 
     suspend fun setHfToken(token: String) {

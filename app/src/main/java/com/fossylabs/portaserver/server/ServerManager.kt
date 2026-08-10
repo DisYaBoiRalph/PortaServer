@@ -20,11 +20,17 @@ object ServerManager {
         sqlPort: Int,
         timeoutMs: Long?,
         modelName: String? = null,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
     ) {
         val intent = Intent(context, ServerForegroundService::class.java).apply {
             putExtra(ServerForegroundService.EXTRA_LLM_PORT, llmPort)
             putExtra(ServerForegroundService.EXTRA_SQL_PORT, sqlPort)
             putExtra(ServerForegroundService.EXTRA_TIMEOUT_MS, timeoutMs ?: -1L)
+            putExtra(ServerForegroundService.EXTRA_MAX_TOKENS, maxTokens)
+            putExtra(ServerForegroundService.EXTRA_TEMPERATURE, temperature)
+            putExtra(ServerForegroundService.EXTRA_TOP_P, topP)
             modelName?.takeIf { it.isNotBlank() }?.let {
                 putExtra(ServerForegroundService.EXTRA_MODEL_NAME, it)
             }

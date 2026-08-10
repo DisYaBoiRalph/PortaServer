@@ -48,6 +48,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { repository.setSqlPort(port) }
     }
 
+    fun setNCtx(value: Int) {
+        viewModelScope.launch { repository.setNCtx(value) }
+    }
+
+    fun setNThreads(value: Int) {
+        viewModelScope.launch { repository.setNThreads(value) }
+    }
+
+    fun setTemperature(value: Float) {
+        viewModelScope.launch { repository.setTemperature(value) }
+    }
+
+    fun setTopP(value: Float) {
+        viewModelScope.launch { repository.setTopP(value) }
+    }
+
+    fun setMaxTokens(value: Int) {
+        viewModelScope.launch { repository.setMaxTokens(value) }
+    }
+
     fun setHfToken(token: String) {
         viewModelScope.launch { repository.setHfToken(token) }
     }

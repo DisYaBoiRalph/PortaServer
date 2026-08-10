@@ -383,6 +383,13 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     fun loadModel(path: String) {
         if (!_isPreparingModelLoad.compareAndSet(false, true)) return
         viewModelScope.launch {
+            // Read once per load: nCtx and thread count are fixed at load time, so
+            // editing them in Settings only takes effect on the next load.
+            val cfg = settingsRepo.settings.first()
+            val nCtx = cfg.nCtx
+            val nThreads = cfg.resolvedThreads(Runtime.getRuntime().availableProcessors())
+            val temperature = cfg.temperature
+            val topP = cfg.topP
             var engineLoadAttempted = false
             var newActiveCachePaths: Set<String> = emptySet()
             try {
@@ -410,7 +417,14 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                                     "Loading model via native fd loader: fd=${it.fd}, name=$selectedFileName",
                                 )
                                 engineLoadAttempted = true
-                                LlmInferenceEngine.loadModelFromFd(it.fd, selectedFileName)
+                                LlmInferenceEngine.loadModelFromFd(
+                                    fd = it.fd,
+                                    label = selectedFileName,
+                                    nCtx = nCtx,
+                                    nThreads = nThreads,
+                                    temperature = temperature,
+                                    topP = topP,
+                                )
                             }
                             fastPathOk = true
                         } catch (e: Exception) {
@@ -465,7 +479,13 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
                             try {
                                 engineLoadAttempted = true
-                                LlmInferenceEngine.loadModel(entryCacheFile.absolutePath)
+                                LlmInferenceEngine.loadModel(
+                                    modelPath = entryCacheFile.absolutePath,
+                                    nCtx = nCtx,
+                                    nThreads = nThreads,
+                                    temperature = temperature,
+                                    topP = topP,
+                                )
                             } catch (e: Exception) {
                                 // Remove copied files when load fails to avoid cache bloat.
                                 copiedCacheFiles.forEach { it.delete() }
@@ -477,7 +497,13 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } else {
                     engineLoadAttempted = true
-                    LlmInferenceEngine.loadModel(path)
+                    LlmInferenceEngine.loadModel(
+                        modelPath = path,
+                        nCtx = nCtx,
+                        nThreads = nThreads,
+                        temperature = temperature,
+                        topP = topP,
+                    )
                     newActiveCachePaths = emptySet()
                 }
                 setActiveModelCachePaths(newActiveCachePaths)
@@ -537,6 +563,9 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
             sqlPort = s.sqlPort,
             timeoutMs = timeoutMs,
             modelName = loadedModel.value?.name,
+            maxTokens = s.maxTokens,
+            temperature = s.temperature,
+            topP = s.topP,
         )
     }
 
