@@ -15,6 +15,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -35,6 +37,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -54,9 +58,18 @@ fun SettingsScreen(
     var timeoutFieldValue by remember { mutableStateOf(settings.inactivityTimeoutMinutes?.toString() ?: "") }
     var llmPortValue by remember { mutableStateOf(settings.llmPort.toString()) }
     var sqlPortValue by remember { mutableStateOf(settings.sqlPort.toString()) }
+    var hfTokenValue by remember { mutableStateOf(settings.hfToken.orEmpty()) }
+    var hfTokenVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(settings.inactivityTimeoutMinutes) {
         timeoutFieldValue = settings.inactivityTimeoutMinutes?.toString() ?: ""
+    }
+    // Only resync when the stored value genuinely differs, so the field is populated
+    // once DataStore loads without snapping the cursor while the user is typing.
+    LaunchedEffect(settings.hfToken) {
+        if (settings.hfToken.orEmpty() != hfTokenValue.trim()) {
+            hfTokenValue = settings.hfToken.orEmpty()
+        }
     }
     LaunchedEffect(settings.llmPort) { llmPortValue = settings.llmPort.toString() }
     LaunchedEffect(settings.sqlPort) { sqlPortValue = settings.sqlPort.toString() }
@@ -155,6 +168,40 @@ fun SettingsScreen(
                     },
                     label = { Text("SQL server port") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+
+            item { SettingsSectionHeader("HuggingFace") }
+
+            item {
+                OutlinedTextField(
+                    value = hfTokenValue,
+                    onValueChange = { value ->
+                        hfTokenValue = value
+                        viewModel.setHfToken(value)
+                    },
+                    label = { Text("Access token") },
+                    supportingText = {
+                        Text("Needed for gated models such as Llama and Gemma. Create one at huggingface.co/settings/tokens")
+                    },
+                    visualTransformation = if (hfTokenVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { hfTokenVisible = !hfTokenVisible }) {
+                            Icon(
+                                if (hfTokenVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                contentDescription = if (hfTokenVisible) "Hide token" else "Show token",
+                            )
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()

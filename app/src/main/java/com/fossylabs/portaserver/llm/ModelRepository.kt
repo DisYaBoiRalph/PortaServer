@@ -18,6 +18,9 @@ private val hfJson = Json { ignoreUnknownKeys = true }
 class ModelRepository(
     private val httpClient: HttpClient,
     private val contentResolver: ContentResolver,
+    /** Supplies the HuggingFace token, or null when unset. Read per request so a token
+     *  entered in Settings takes effect without rebuilding this repository. */
+    private val hfToken: suspend () -> String? = { null },
 ) {
 
     /** Recursively scans SAF tree URIs for .gguf files. */
@@ -73,8 +76,10 @@ class ModelRepository(
     /** Fetches text-generation GGUF models from HuggingFace Hub. */
     suspend fun fetchHuggingFaceModels(): List<ModelInfo> {
         return try {
+            val token = hfToken()
             val dtos: List<HuggingFaceModelDto> = httpClient
                 .get("https://huggingface.co/api/models") {
+                    bearer(token)
                     parameter("filter", "gguf")
                     parameter("task", "text-generation")
                     parameter("sort", "downloads")
@@ -106,8 +111,10 @@ class ModelRepository(
     /** Fetches the list of GGUF sibling files for a given HuggingFace model. */
     suspend fun fetchModelFiles(modelId: String): List<HuggingFaceFileDto> {
         return try {
+            val token = hfToken()
             val detail: HuggingFaceModelDetailDto = httpClient
                 .get("https://huggingface.co/api/models/$modelId") {
+                    bearer(token)
                     // Include blob metadata so sibling GGUF entries expose size/lfs before download.
                     parameter("blobs", true)
                 }

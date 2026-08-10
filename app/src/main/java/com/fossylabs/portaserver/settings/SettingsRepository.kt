@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -36,6 +37,8 @@ data class SettingsState(
     val downloadDirectory: String? = null,
     val fileMetadata: Map<String, FileMeta> = emptyMap(),
     val hfFileMetadata: Map<String, FileMeta> = emptyMap(),
+    /** HuggingFace access token, required for gated repos. Null when unset. */
+    val hfToken: String? = null,
 )
 
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
@@ -49,6 +52,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val KEY_DOWNLOAD_DIR = stringPreferencesKey("download_directory")
         val KEY_FILE_METADATA = stringSetPreferencesKey("file_metadata")
         val KEY_HF_FILE_METADATA = stringSetPreferencesKey("hf_file_metadata")
+        val KEY_HF_TOKEN = stringPreferencesKey("hf_token")
         const val TIMEOUT_DISABLED = -1
     }
 
@@ -61,6 +65,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             sqlPort = prefs[KEY_SQL_PORT] ?: 8181,
             scanDirectories = prefs[KEY_SCAN_DIRS] ?: emptySet(),
             downloadDirectory = prefs[KEY_DOWNLOAD_DIR],
+            hfToken = prefs[KEY_HF_TOKEN]?.takeIf { it.isNotBlank() },
             fileMetadata = (prefs[KEY_FILE_METADATA] ?: emptySet()).mapNotNull { raw ->
                 runCatching {
                     if (raw.startsWith("{")) {
@@ -129,6 +134,13 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
     suspend fun setDownloadDirectory(uriString: String) {
         dataStore.edit { it[KEY_DOWNLOAD_DIR] = uriString }
     }
+
+    suspend fun setHfToken(token: String) {
+        dataStore.edit { it[KEY_HF_TOKEN] = token.trim() }
+    }
+
+    /** Current HuggingFace token, or null when unset. */
+    suspend fun hfToken(): String? = settings.first().hfToken
 
     suspend fun saveFileMeta(fileUri: String, expectedSize: Long, sha256: String?) {
         val entry = metaJson.encodeToString(FileMetaEntry(fileUri, expectedSize, sha256))

@@ -48,6 +48,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { repository.setSqlPort(port) }
     }
 
+    fun setHfToken(token: String) {
+        viewModelScope.launch { repository.setHfToken(token) }
+    }
+
     fun addScanDirectory(uriString: String) {
         viewModelScope.launch { repository.addScanDirectory(uriString) }
     }

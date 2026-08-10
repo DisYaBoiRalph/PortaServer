@@ -54,7 +54,11 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
             json(Json { ignoreUnknownKeys = true })
         }
     }
-    private val modelRepository = ModelRepository(httpClient, application.contentResolver)
+    private val modelRepository = ModelRepository(
+        httpClient = httpClient,
+        contentResolver = application.contentResolver,
+        hfToken = { settingsRepo.hfToken() },
+    )
 
     val serverState: StateFlow<ServerState> = ServerManager.state
 

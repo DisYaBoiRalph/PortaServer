@@ -181,16 +181,27 @@ class ModelDownloadManager(
                 DownloadNotifier.ensureChannel(application)
                 val startMs = System.currentTimeMillis()
 
+                // Resolved once per download and reused by every request below.
+                val hfToken = settingsRepo.hfToken()
+
                 // Try to get metadata (HEAD) to decide on parallel ranged download
                 var contentLength: Long? = null
                 var acceptRanges: String? = null
+                var probeStatus: Int? = null
                 try {
-                    httpClient.prepareGet(url).execute { resp ->
+                    httpClient.prepareGet(url) { bearer(hfToken) }.execute { resp ->
+                        probeStatus = resp.status.value
                         contentLength = resp.headers["Content-Length"]?.toLongOrNull()
                         acceptRanges = resp.headers["Accept-Ranges"]?.lowercase()
                     }
                 } catch (_: Exception) {
                     // ignore and fall back to GET
+                }
+                // Checked outside the try so an auth failure is not swallowed with the
+                // best-effort probe errors. Without this the range path would report a
+                // misleading "did not return partial content" instead of naming the token.
+                probeStatus?.let { status ->
+                    huggingFaceAuthMessage(status, hfToken != null)?.let { error(it) }
                 }
 
                 val progressLock = Any()
@@ -244,7 +255,9 @@ class ModelDownloadManager(
                 // Local helper: sequential download (used as fallback)
                 suspend fun doSequentialDownload() {
                     totalDownloaded = 0L
-                    httpClient.prepareGet(url).execute { response ->
+                    httpClient.prepareGet(url) { bearer(hfToken) }.execute { response ->
+                        huggingFaceAuthMessage(response.status.value, hfToken != null)
+                            ?.let { error(it) }
                         val cl = response.headers["Content-Length"]?.toLongOrNull()
                         val channel = response.bodyAsChannel()
                         val buffer = ByteArray(IO_BUFFER_SIZE)
@@ -310,6 +323,7 @@ class ModelDownloadManager(
                                 val jobs = ranges.map { (start, end) ->
                                     launch(Dispatchers.IO) {
                                         val resp = httpClient.get(url) {
+                                            bearer(hfToken)
                                             headers { append("Range", "bytes=$start-$end") }
                                         }
                                         if (resp.status.value != 206) {
