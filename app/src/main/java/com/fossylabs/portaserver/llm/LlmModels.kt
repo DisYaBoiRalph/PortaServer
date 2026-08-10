@@ -102,6 +102,12 @@ data class ModelsListResponse(
 )
 
 @Serializable
+data class HealthResponse(
+    val status: String = "ok",
+    val model: String? = null,
+)
+
+@Serializable
 data class OpenAIModelDto(
     val id: String,
     val `object`: String = "model",

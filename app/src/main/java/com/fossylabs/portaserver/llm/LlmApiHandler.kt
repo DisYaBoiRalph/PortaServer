@@ -16,6 +16,10 @@ private val apiJson = Json { ignoreUnknownKeys = true }
 
 fun Route.llmRoutes() {
 
+    get("/health") {
+        call.respond(HealthResponse(model = LlmInferenceEngine.loadedModel.value?.name))
+    }
+
     get("/v1/models") {
         val loadedModel = LlmInferenceEngine.loadedModel.value
         val data = if (loadedModel != null) {
@@ -24,6 +28,25 @@ fun Route.llmRoutes() {
             emptyList()
         }
         call.respond(ModelsListResponse(data = data))
+    }
+
+    // Clients that resolve a model before connecting probe this rather than /v1/models.
+    get("/v1/models/{modelId}") {
+        val modelId = call.parameters["modelId"]
+        val loadedModel = LlmInferenceEngine.loadedModel.value
+        if (loadedModel == null || loadedModel.name != modelId) {
+            call.respond(
+                HttpStatusCode.NotFound,
+                mapOf(
+                    "error" to mapOf(
+                        "message" to "Model '$modelId' is not loaded",
+                        "type" to "invalid_request_error",
+                    )
+                ),
+            )
+        } else {
+            call.respond(OpenAIModelDto(id = loadedModel.name))
+        }
     }
 
     post("/v1/chat/completions") {
