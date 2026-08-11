@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "name": "Qwen2.5 0.5B Instruct",
+      "modelId": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+      "fileName": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+      "sizeBytes": 491400032,
+      "minRamGb": 2,
+      "quant": "Q4_K_M",
+      "description": "Smallest useful chat model. Good for checking the server end to end on low-RAM devices."
+    },
+    {
+      "name": "Llama 3.2 1B Instruct",
+      "modelId": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+      "fileName": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 807694464,
+      "minRamGb": 2,
+      "quant": "Q4_K_M",
+      "description": "Meta's compact instruct model. Fast on phones, decent at short conversational tasks."
+    },
+    {
+      "name": "Qwen2.5 1.5B Instruct",
+      "modelId": "bartowski/Qwen2.5-1.5B-Instruct-GGUF",
+      "fileName": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 986048768,
+      "minRamGb": 2,
+      "quant": "Q4_K_M",
+      "description": "Strong quality for its size. A good default on 3-4 GB devices."
+    },
+    {
+      "name": "Qwen2.5 Coder 1.5B Instruct",
+      "modelId": "bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+      "fileName": "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 986048800,
+      "minRamGb": 2,
+      "quant": "Q4_K_M",
+      "description": "Code-tuned. The lightest option worth pointing an autocomplete client at."
+    },
+    {
+      "name": "Gemma 2 2B Instruct",
+      "modelId": "bartowski/gemma-2-2b-it-GGUF",
+      "fileName": "gemma-2-2b-it-Q4_K_M.gguf",
+      "sizeBytes": 1708582752,
+      "minRamGb": 3,
+      "quant": "Q4_K_M",
+      "description": "Google's small instruct model. Verbose but well behaved at chat."
+    },
+    {
+      "name": "Qwen2.5 3B Instruct",
+      "modelId": "bartowski/Qwen2.5-3B-Instruct-GGUF",
+      "fileName": "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 1929903264,
+      "minRamGb": 4,
+      "quant": "Q4_K_M",
+      "description": "Noticeably better reasoning than the 1.5B tier, still comfortable on 4 GB."
+    },
+    {
+      "name": "Qwen2.5 7B Instruct",
+      "modelId": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+      "fileName": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 4683074240,
+      "minRamGb": 8,
+      "quant": "Q4_K_M",
+      "description": "General-purpose 7B. Expect slow generation on phones, but the best quality here."
+    },
+    {
+      "name": "Qwen2.5 Coder 7B Instruct",
+      "modelId": "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "fileName": "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 4683074336,
+      "minRamGb": 8,
+      "quant": "Q4_K_M",
+      "description": "The strongest coding option that fits an 8 GB phone. Pairs well with Continue or OpenCode."
+    },
+    {
+      "name": "Llama 3.1 8B Instruct",
+      "modelId": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+      "fileName": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+      "sizeBytes": 4920739232,
+      "minRamGb": 8,
+      "quant": "Q4_K_M",
+      "description": "Meta's 8B instruct model. The heaviest entry; only worth it on 8 GB or more."
+    }
+  ]
+}

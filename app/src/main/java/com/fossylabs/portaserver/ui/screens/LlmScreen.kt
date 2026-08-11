@@ -74,12 +74,14 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.fossylabs.portaserver.llm.AllowlistEntry
 import com.fossylabs.portaserver.llm.DownloadState
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
 import com.fossylabs.portaserver.llm.MemoryGuard
 import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
 import com.fossylabs.portaserver.llm.ModelTier
+import com.fossylabs.portaserver.llm.toModelInfo
 import com.fossylabs.portaserver.server.ServerState
 import kotlinx.coroutines.launch
 
@@ -105,6 +107,7 @@ fun LlmScreen(
     val isFetchingFiles by viewModel.isFetchingFiles.collectAsStateWithLifecycle()
     val downloadStates by viewModel.downloadStates.collectAsStateWithLifecycle()
     val localIp by viewModel.localIp.collectAsStateWithLifecycle()
+    val curatedModels by viewModel.curatedModels.collectAsStateWithLifecycle()
 
     // A load the user must confirm because it is projected to strain device memory.
     var pendingLoad by remember { mutableStateOf<PendingMemoryLoad?>(null) }
@@ -426,6 +429,31 @@ fun LlmScreen(
                 }
             }
 
+            // ── Curated models ──────────────────────────────────────────────
+            if (curatedModels.isNotEmpty()) {
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    SectionHeader("Curated")
+                    Text(
+                        "Vetted text-generation models, filtered to what this device can run.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                    HorizontalDivider()
+                }
+
+                items(curatedModels, key = { it.modelId }) { entry ->
+                    CuratedModelCard(
+                        entry = entry,
+                        // Reuses the HuggingFace detail sheet: the curated entry carries
+                        // the same repository id the file lookup keys on.
+                        onClick = { viewModel.selectHfModel(entry.toModelInfo()) },
+                        fitsDevice = deviceSpecs?.let { it.totalRamGb >= entry.minRamGb } ?: true,
+                    )
+                }
+            }
+
             // ── HuggingFace discover section ────────────────────────────────
             item {
                 Spacer(Modifier.height(8.dp))
@@ -517,6 +545,61 @@ private data class PendingMemoryLoad(
     val estimatedPeakBytes: Long,
     val totalRamBytes: Long,
 )
+
+/** Curated-list row. Mirrors [HfModelCard] but shows vetted size/quant instead of stats. */
+@Composable
+private fun CuratedModelCard(
+    entry: AllowlistEntry,
+    fitsDevice: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    entry.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (!fitsDevice) {
+                    SuggestionChip(
+                        onClick = {},
+                        label = {
+                            Text(
+                                "Needs ${entry.minRamGb} GB",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        },
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                entry.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${formatFileSize(entry.sizeBytes)}  ·  ${entry.quant}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
+}
 
 @Composable
 private fun MemoryWarningDialog(

@@ -9,6 +9,8 @@ import com.fossylabs.portaserver.llm.DeviceSpecs
 import com.fossylabs.portaserver.llm.DeviceSpecsReader
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
 import com.fossylabs.portaserver.llm.LlmInferenceEngine
+import com.fossylabs.portaserver.llm.AllowlistEntry
+import com.fossylabs.portaserver.llm.ModelAllowlistRepository
 import com.fossylabs.portaserver.llm.ModelCacheManager
 import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
@@ -59,6 +61,11 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         contentResolver = application.contentResolver,
         hfToken = { settingsRepo.hfToken() },
     )
+
+    private val allowlistRepository = ModelAllowlistRepository(application, httpClient)
+
+    private val _curatedModels = MutableStateFlow<List<AllowlistEntry>>(emptyList())
+    val curatedModels: StateFlow<List<AllowlistEntry>> = _curatedModels.asStateFlow()
 
     val serverState: StateFlow<ServerState> = ServerManager.state
 
@@ -127,6 +134,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     init {
         refreshDeviceSpecs()
         refreshLocalModels()
+        loadCuratedModels()
         viewModelScope.launch(Dispatchers.IO) {
             val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
             if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
@@ -135,6 +143,17 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     "Startup model cache cleanup: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
                 )
             }
+        }
+    }
+
+    /**
+     * Shows the bundled list immediately, then quietly upgrades it if a newer one can be
+     * fetched. A failed refresh leaves the bundled list in place rather than emptying it.
+     */
+    private fun loadCuratedModels() {
+        viewModelScope.launch {
+            _curatedModels.value = allowlistRepository.load()
+            allowlistRepository.refresh()?.let { _curatedModels.value = it }
         }
     }
 
