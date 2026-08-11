@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The app is itself a plaintext HTTP server, and the "Test connection" probe checks the
+  address it hands to clients. That address is a LAN IP assigned at runtime, so it cannot
+  be enumerated here and cleartext has to be permitted in general.
+
+  The hosts we actually reach out to are pinned back to HTTPS individually, so permitting
+  cleartext for the LAN cannot be turned into a downgrade of a model download or an
+  allowlist refresh.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">huggingface.co</domain>
+        <domain includeSubdomains="true">hf.co</domain>
+        <domain includeSubdomains="true">raw.githubusercontent.com</domain>
+    </domain-config>
+</network-security-config>
