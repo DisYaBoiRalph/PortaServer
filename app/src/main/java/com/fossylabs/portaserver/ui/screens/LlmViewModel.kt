@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.fossylabs.portaserver.llm.DeviceSpecs
 import com.fossylabs.portaserver.llm.DeviceSpecsReader
+import com.fossylabs.portaserver.llm.HealthCheckResult
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
 import com.fossylabs.portaserver.llm.LlmInferenceEngine
 import com.fossylabs.portaserver.llm.AllowlistEntry
@@ -24,7 +25,10 @@ import com.fossylabs.portaserver.settings.SettingsRepository
 import com.fossylabs.portaserver.settings.settingsDataStore
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.timeout
+import io.ktor.client.request.get
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +51,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val IO_BUFFER_SIZE = 8192
+        const val HEALTH_TIMEOUT_MS = 5_000L
         val GGUF_SPLIT_NAME_REGEX = Regex("^(.*)-(\\d{5})-of-(\\d{5})(\\.gguf)$", RegexOption.IGNORE_CASE)
     }
 
@@ -56,6 +61,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
+        install(HttpTimeout)
     }
     private val modelRepository = ModelRepository(
         httpClient = httpClient,
@@ -67,6 +73,12 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _curatedModels = MutableStateFlow<List<AllowlistEntry>>(emptyList())
     val curatedModels: StateFlow<List<AllowlistEntry>> = _curatedModels.asStateFlow()
+
+    private val _healthCheck = MutableStateFlow<HealthCheckResult?>(null)
+    val healthCheck: StateFlow<HealthCheckResult?> = _healthCheck.asStateFlow()
+
+    private val _isCheckingHealth = MutableStateFlow(false)
+    val isCheckingHealth: StateFlow<Boolean> = _isCheckingHealth.asStateFlow()
 
     val serverState: StateFlow<ServerState> = ServerManager.state
 
@@ -549,6 +561,41 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
             temperature = s.temperature,
             topP = s.topP,
         )
+    }
+
+    /**
+     * Probes /health at [baseUrl] so a broken connection is diagnosed before the user
+     * starts pasting client config. Deliberately goes over the network rather than
+     * checking in-process state — the point is to prove the address actually works.
+     */
+    fun checkHealth(baseUrl: String, label: String) {
+        if (_isCheckingHealth.value) return
+        viewModelScope.launch {
+            _isCheckingHealth.value = true
+            _healthCheck.value = try {
+                val response = httpClient.get("$baseUrl/health") {
+                    timeout { requestTimeoutMillis = HEALTH_TIMEOUT_MS }
+                }
+                val ok = response.status.value in 200..299
+                HealthCheckResult(
+                    label = label,
+                    success = ok,
+                    message = if (ok) "Reachable at $baseUrl" else "HTTP ${response.status.value} from $baseUrl",
+                )
+            } catch (e: Exception) {
+                HealthCheckResult(
+                    label = label,
+                    success = false,
+                    message = e.message ?: "Could not reach $baseUrl",
+                )
+            } finally {
+                _isCheckingHealth.value = false
+            }
+        }
+    }
+
+    fun clearHealthCheck() {
+        _healthCheck.value = null
     }
 
     fun stopServer() {

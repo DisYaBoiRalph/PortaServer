@@ -83,6 +83,11 @@ import com.fossylabs.portaserver.llm.ModelRecommender
 import com.fossylabs.portaserver.llm.ModelTier
 import com.fossylabs.portaserver.llm.toModelInfo
 import com.fossylabs.portaserver.server.ServerState
+import com.fossylabs.portaserver.ui.components.ClientSetup
+import com.fossylabs.portaserver.ui.components.ClientSetupCard
+import com.fossylabs.portaserver.ui.components.EndpointCard
+import com.fossylabs.portaserver.ui.components.HealthResultCard
+import com.fossylabs.portaserver.ui.components.allSnippets
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -108,6 +113,8 @@ fun LlmScreen(
     val downloadStates by viewModel.downloadStates.collectAsStateWithLifecycle()
     val localIp by viewModel.localIp.collectAsStateWithLifecycle()
     val curatedModels by viewModel.curatedModels.collectAsStateWithLifecycle()
+    val healthCheck by viewModel.healthCheck.collectAsStateWithLifecycle()
+    val isCheckingHealth by viewModel.isCheckingHealth.collectAsStateWithLifecycle()
 
     // A load the user must confirm because it is projected to strain device memory.
     var pendingLoad by remember { mutableStateOf<PendingMemoryLoad?>(null) }
@@ -426,6 +433,56 @@ fun LlmScreen(
                         onLoad = { requestLoad(model.path) },
                         onUnload = viewModel::unloadModel,
                     )
+                }
+            }
+
+            // ── Connect a client ────────────────────────────────────────────
+            // Only meaningful once there is an address and a model name to put in the
+            // snippets, so it stays hidden until the server is actually serving.
+            if (serverState == ServerState.RUNNING && loadedModel != null && localIp != null) {
+                val setup = ClientSetup(
+                    baseUrl = "http://$localIp:${settings.llmPort}",
+                    modelName = loadedModel!!.name,
+                    contextLength = settings.nCtx,
+                    maxTokens = settings.maxTokens,
+                )
+
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    SectionHeader("Connect a client")
+                    HorizontalDivider()
+                    Spacer(Modifier.height(4.dp))
+                    EndpointCard(label = "Base URL", url = setup.apiBase)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { viewModel.checkHealth(setup.baseUrl, "Local network") },
+                            enabled = !isCheckingHealth,
+                        ) {
+                            if (isCheckingHealth) {
+                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text("Test connection")
+                        }
+                        healthCheck?.let {
+                            Spacer(Modifier.width(8.dp))
+                            TextButton(onClick = viewModel::clearHealthCheck) { Text("Clear") }
+                        }
+                    }
+                    healthCheck?.let {
+                        HealthResultCard(
+                            label = it.label,
+                            success = it.success,
+                            message = it.message,
+                        )
+                    }
+                }
+
+                items(setup.allSnippets(), key = { it.title }) { snippet ->
+                    ClientSetupCard(snippet = snippet)
                 }
             }
 

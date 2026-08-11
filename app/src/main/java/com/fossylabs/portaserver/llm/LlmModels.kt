@@ -28,6 +28,13 @@ data class DeviceSpecs(
     val totalRamGb: Float get() = totalRamBytes / (1024f * 1024f * 1024f)
 }
 
+/** Outcome of a reachability probe run from the app against its own server. */
+data class HealthCheckResult(
+    val label: String,
+    val success: Boolean,
+    val message: String,
+)
+
 data class ModelTier(
     val maxParamBillion: Float,
     val recommendedQuant: String,
