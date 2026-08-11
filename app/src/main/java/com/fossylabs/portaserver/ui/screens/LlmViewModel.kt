@@ -14,6 +14,7 @@ import com.fossylabs.portaserver.llm.ModelAllowlistRepository
 import com.fossylabs.portaserver.llm.ModelCacheManager
 import com.fossylabs.portaserver.llm.ModelInfo
 import com.fossylabs.portaserver.llm.ModelRecommender
+import com.fossylabs.portaserver.llm.ModelSession
 import com.fossylabs.portaserver.llm.ModelRepository
 import com.fossylabs.portaserver.llm.ModelTier
 import com.fossylabs.portaserver.service.ServerForegroundService
@@ -121,8 +122,6 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         onRefreshLocalModels = ::refreshLocalModels,
     )
     val downloadStates: StateFlow<Map<String, DownloadState>> = downloadManager.downloadStates
-    private val modelCacheLock = Any()
-    private var activeModelCachePaths: Set<String> = emptySet()
 
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -389,15 +388,6 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         return cacheFile
     }
 
-    private fun getActiveModelCachePaths(): Set<String> = synchronized(modelCacheLock) {
-        activeModelCachePaths
-    }
-
-    private fun setActiveModelCachePaths(paths: Set<String>) {
-        synchronized(modelCacheLock) {
-            activeModelCachePaths = paths
-        }
-    }
 
     fun loadModel(path: String) {
         if (!_isPreparingModelLoad.compareAndSet(false, true)) return
@@ -525,32 +515,15 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     newActiveCachePaths = emptySet()
                 }
-                setActiveModelCachePaths(newActiveCachePaths)
-                withContext(Dispatchers.IO) {
-                    val cleanup = ModelCacheManager.clearModelCache(
-                        getApplication<Application>().cacheDir,
-                        keepAbsolutePaths = getActiveModelCachePaths(),
-                    )
-                    if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
-                        Log.i(
-                            "LlmViewModel",
-                            "Model cache cleanup after load: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
-                        )
-                    }
-                }
+                ModelSession.setActiveCachePaths(newActiveCachePaths)
+                ModelSession.clearCache(
+                    getApplication(), reason = "load", keepActive = true,
+                )
                 _errorMessage.value = null
             } catch (e: Exception) {
                 if (engineLoadAttempted) {
-                    setActiveModelCachePaths(emptySet())
-                    withContext(Dispatchers.IO) {
-                        val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
-                        if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
-                            Log.i(
-                                "LlmViewModel",
-                                "Model cache cleanup after load error: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
-                            )
-                        }
-                    }
+                    ModelSession.setActiveCachePaths(emptySet())
+                    ModelSession.clearCache(getApplication(), reason = "load error")
                 }
                 _errorMessage.value = "Failed to load model: ${e.message}"
             } finally {
@@ -560,17 +533,7 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun unloadModel() {
-        setActiveModelCachePaths(emptySet())
-        viewModelScope.launch(Dispatchers.IO) {
-            LlmInferenceEngine.unloadModel()
-            val cleanup = ModelCacheManager.clearModelCache(getApplication<Application>().cacheDir)
-            if (cleanup.deletedFiles > 0 || cleanup.failedFiles > 0) {
-                Log.i(
-                    "LlmViewModel",
-                    "Model cache cleanup after unload: deleted=${cleanup.deletedFiles}, failed=${cleanup.failedFiles}, freedBytes=${cleanup.freedBytes}",
-                )
-            }
-        }
+        viewModelScope.launch { ModelSession.unload(getApplication()) }
     }
 
     fun startServer() {
