@@ -83,6 +83,7 @@ import com.fossylabs.portaserver.llm.ModelRecommender
 import com.fossylabs.portaserver.llm.ModelTier
 import com.fossylabs.portaserver.llm.toModelInfo
 import com.fossylabs.portaserver.server.ServerState
+import com.fossylabs.portaserver.settings.resolveDownloadDirectory
 import com.fossylabs.portaserver.ui.components.ClientSetup
 import com.fossylabs.portaserver.ui.components.ClientSetupCard
 import com.fossylabs.portaserver.ui.components.EndpointCard
@@ -143,6 +144,12 @@ fun LlmScreen(
     }
 
     val context = LocalContext.current
+
+    // Downloads fall back to a writable scan directory, so someone who already picked a
+    // models folder is not asked to pick a second one just to download into it.
+    val effectiveDownloadDir = remember(settings.downloadDirectory, settings.scanDirectories) {
+        settings.resolveDownloadDirectory(context.contentResolver)
+    }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -189,7 +196,7 @@ fun LlmScreen(
         pendingDownloadForNotificationPermission = null
         if (pending != null) {
             val (modelId, fileName) = pending
-            if (settings.downloadDirectory == null) {
+            if (effectiveDownloadDir == null) {
                 pendingDownload = modelId to fileName
                 dirPickerLauncher.launch(null)
             } else {
@@ -201,8 +208,8 @@ fun LlmScreen(
     // Show snackbar once per download start instead of on every progress tick.
     var snackbarShownFor by remember { mutableStateOf<String?>(null) }
     val activeDownloadName = downloadStates.entries.firstOrNull { !it.value.done }?.key
-    LaunchedEffect(activeDownloadName, settings.downloadDirectory) {
-        val currentDownloadDir = settings.downloadDirectory
+    LaunchedEffect(activeDownloadName, effectiveDownloadDir) {
+        val currentDownloadDir = effectiveDownloadDir
         if (activeDownloadName == null) {
             snackbarShownFor = null
             return@LaunchedEffect
@@ -552,7 +559,7 @@ fun LlmScreen(
             model = selectedHfModel!!,
             files = hfModelFiles,
             isFetchingFiles = isFetchingFiles,
-            downloadDirectory = settings.downloadDirectory,
+            downloadDirectory = effectiveDownloadDir,
             downloadStates = downloadStates,
             loadedModelPath = loadedModel?.path,
             isLoadingModel = isLoadingModel,
@@ -569,7 +576,7 @@ fun LlmScreen(
                 if (needsNotificationPermission) {
                     pendingDownloadForNotificationPermission = modelId to fileName
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } else if (settings.downloadDirectory == null) {
+                } else if (effectiveDownloadDir == null) {
                     pendingDownload = modelId to fileName
                     dirPickerLauncher.launch(null)
                 } else {

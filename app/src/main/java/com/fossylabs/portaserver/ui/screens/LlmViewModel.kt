@@ -22,6 +22,7 @@ import com.fossylabs.portaserver.service.ServerForegroundService
 import com.fossylabs.portaserver.server.ServerManager
 import com.fossylabs.portaserver.server.ServerState
 import com.fossylabs.portaserver.settings.SettingsRepository
+import com.fossylabs.portaserver.settings.resolveDownloadDirectory
 import com.fossylabs.portaserver.settings.settingsDataStore
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
@@ -282,8 +283,15 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Download target, falling back to a writable scan directory so a user who already picked
+     * a models folder is not asked to pick a second one.
+     */
+    fun effectiveDownloadDirectory(): String? =
+        settings.value.resolveDownloadDirectory(getApplication<Application>().contentResolver)
+
     fun downloadFile(modelId: String, fileName: String) {
-        val downloadDirUri = settings.value.downloadDirectory ?: return
+        val downloadDirUri = effectiveDownloadDirectory() ?: return
         downloadManager.downloadFile(modelId, fileName, downloadDirUri, _hfModelFiles.value)
     }
 

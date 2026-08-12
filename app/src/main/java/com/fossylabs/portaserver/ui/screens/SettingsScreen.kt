@@ -90,7 +90,9 @@ fun SettingsScreen(
         uri?.let {
             context.contentResolver.takePersistableUriPermission(
                 it,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                // Write is taken as well so a scan directory can double as the download
+                // target; read-only grants cannot be upgraded without re-picking the folder.
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
             viewModel.addScanDirectory(it.toString())
         }

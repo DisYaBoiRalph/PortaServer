@@ -1,5 +1,6 @@
 package com.fossylabs.portaserver.settings
 
+import android.content.ContentResolver
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -240,4 +241,20 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             }.toSet()
         }
     }
+}
+
+/**
+ * Where downloads should be written: the explicitly chosen directory, otherwise the first
+ * scan directory we actually hold write permission on.
+ *
+ * Scan directories were historically taken read-only, so holding the URI is not proof we
+ * can write into it -- the grant has to be checked rather than assumed, or the download
+ * fails at createDocument with a permission error instead of prompting.
+ */
+fun SettingsState.resolveDownloadDirectory(resolver: ContentResolver): String? {
+    downloadDirectory?.let { return it }
+    val writable = resolver.persistedUriPermissions
+        .filter { it.isWritePermission }
+        .mapTo(mutableSetOf()) { it.uri.toString() }
+    return scanDirectories.firstOrNull { it in writable }
 }
