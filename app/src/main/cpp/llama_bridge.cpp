@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstring>
 #include "llama.h"
+#include "chat.h"
+#include <nlohmann/json.hpp>
 
 #define LOG_TAG "LlamaBridge"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -544,4 +546,204 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeKvCacheClear(
         return;
     }
     llama_memory_clear(mem, false);
+}
+
+// ---------------------------------------------------------------------------
+// Chat templates (tool calling)
+// ---------------------------------------------------------------------------
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeInitChatTemplates(
+        JNIEnv*, jobject, jlong modelPtr) {
+    auto* model = reinterpret_cast<llama_model*>(modelPtr);
+    if (model == nullptr) return 0L;
+    try {
+        // Reads the Jinja chat template out of the GGUF metadata.
+        auto tmpls = common_chat_templates_init(model, "");
+        return reinterpret_cast<jlong>(tmpls.release());
+    } catch (const std::exception& e) {
+        set_last_error(std::string("common_chat_templates_init failed: ") + e.what());
+        return 0L;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeChatTemplates(
+        JNIEnv*, jobject, jlong tmplsPtr) {
+    if (tmplsPtr == 0L) return;
+    common_chat_templates_free(reinterpret_cast<common_chat_templates*>(tmplsPtr));
+}
+
+/** Diagnostic: which template variant was detected, e.g. the model name or "chatml". */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeChatTemplateSource(
+        JNIEnv* env, jobject, jlong tmplsPtr) {
+    if (tmplsPtr == 0L) return env->NewStringUTF("");
+    auto src = common_chat_templates_source(reinterpret_cast<common_chat_templates*>(tmplsPtr));
+    return env->NewStringUTF(src.c_str());
+}
+
+/**
+ * Holds the rendered prompt plus everything needed to parse the model's reply back into
+ * structured tool calls. The PEG parser arena is rebuilt once here rather than per token:
+ * common_chat_params carries it only in serialized form, and streaming re-parses the
+ * whole text after every token.
+ */
+struct ChatRequestState {
+    common_chat_params        params;
+    common_chat_parser_params parser;
+};
+
+static const char* chat_tool_choice_name(common_chat_tool_choice choice) {
+    switch (choice) {
+        case COMMON_CHAT_TOOL_CHOICE_REQUIRED: return "required";
+        case COMMON_CHAT_TOOL_CHOICE_NONE:     return "none";
+        default:                               return "auto";
+    }
+}
+
+static common_chat_tool_choice chat_tool_choice_from_name(const std::string& name) {
+    if (name == "required") return COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+    if (name == "none")     return COMMON_CHAT_TOOL_CHOICE_NONE;
+    return COMMON_CHAT_TOOL_CHOICE_AUTO;
+}
+
+static const char* grammar_trigger_type_name(common_grammar_trigger_type type) {
+    switch (type) {
+        case COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN:        return "token";
+        case COMMON_GRAMMAR_TRIGGER_TYPE_WORD:         return "word";
+        case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN:      return "pattern";
+        case COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL: return "pattern_full";
+        default:                                       return "unknown";
+    }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeBuildChatPrompt(
+        JNIEnv* env, jobject, jlong tmplsPtr,
+        jstring jMessagesJson, jstring jToolsJson, jstring jToolChoice,
+        jboolean parallelToolCalls, jboolean addGenerationPrompt) {
+
+    clear_last_error();
+    if (tmplsPtr == 0L) {
+        set_last_error("nativeBuildChatPrompt called without chat templates");
+        return 0L;
+    }
+
+    const char* messagesChars   = env->GetStringUTFChars(jMessagesJson, nullptr);
+    const char* toolsChars      = jToolsJson   ? env->GetStringUTFChars(jToolsJson,   nullptr) : nullptr;
+    const char* toolChoiceChars = jToolChoice  ? env->GetStringUTFChars(jToolChoice,  nullptr) : nullptr;
+
+    std::string messagesJson = messagesChars ? messagesChars : "[]";
+    std::string toolsJson    = toolsChars    ? toolsChars    : "";
+    std::string toolChoice   = toolChoiceChars ? toolChoiceChars : "auto";
+
+    if (messagesChars)   env->ReleaseStringUTFChars(jMessagesJson, messagesChars);
+    if (toolsChars)      env->ReleaseStringUTFChars(jToolsJson,    toolsChars);
+    if (toolChoiceChars) env->ReleaseStringUTFChars(jToolChoice,   toolChoiceChars);
+
+    try {
+        common_chat_templates_inputs inputs;
+        // The OpenAI-shaped request is handed straight to llama.cpp's own converters, so
+        // tool_calls on assistant turns and tool_call_id on tool results survive intact
+        // rather than being flattened into role/content pairs.
+        inputs.messages              = common_chat_msgs_parse_oaicompat(nlohmann::ordered_json::parse(messagesJson));
+        inputs.add_generation_prompt = addGenerationPrompt == JNI_TRUE;
+        inputs.use_jinja             = true;
+        inputs.parallel_tool_calls   = parallelToolCalls == JNI_TRUE;
+        inputs.tool_choice           = chat_tool_choice_from_name(toolChoice);
+        if (!toolsJson.empty() && toolsJson != "null") {
+            inputs.tools = common_chat_tools_parse_oaicompat(nlohmann::ordered_json::parse(toolsJson));
+        }
+
+        auto* state = new ChatRequestState();
+        state->params = common_chat_templates_apply(
+            reinterpret_cast<const common_chat_templates*>(tmplsPtr), inputs);
+
+        state->parser = common_chat_parser_params(state->params);
+        if (!state->params.parser.empty()) {
+            state->parser.parser.load(state->params.parser);
+        }
+        return reinterpret_cast<jlong>(state);
+    } catch (const std::exception& e) {
+        set_last_error(std::string("nativeBuildChatPrompt failed: ") + e.what());
+        return 0L;
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeChatPromptInfo(
+        JNIEnv* env, jobject, jlong statePtr) {
+
+    if (statePtr == 0L) return env->NewStringUTF("{}");
+    auto* state = reinterpret_cast<ChatRequestState*>(statePtr);
+
+    try {
+        nlohmann::ordered_json out;
+        out["prompt"]       = state->params.prompt;
+        out["format"]       = common_chat_format_name(state->params.format);
+        out["grammar"]      = state->params.grammar;
+        out["grammarLazy"]  = state->params.grammar_lazy;
+        out["toolChoice"]   = chat_tool_choice_name(COMMON_CHAT_TOOL_CHOICE_AUTO);
+
+        auto triggers = nlohmann::ordered_json::array();
+        for (const auto& t : state->params.grammar_triggers) {
+            triggers.push_back({
+                {"type",  grammar_trigger_type_name(t.type)},
+                {"value", t.value},
+                {"token", t.token},
+            });
+        }
+        out["grammarTriggers"]  = triggers;
+        out["preservedTokens"]  = state->params.preserved_tokens;
+        out["additionalStops"]  = state->params.additional_stops;
+        return env->NewStringUTF(out.dump().c_str());
+    } catch (const std::exception& e) {
+        set_last_error(std::string("nativeChatPromptInfo failed: ") + e.what());
+        return env->NewStringUTF("{}");
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeParseChatOutput(
+        JNIEnv* env, jobject, jlong statePtr, jstring jText, jboolean isPartial) {
+
+    if (statePtr == 0L) return env->NewStringUTF("{}");
+    auto* state = reinterpret_cast<ChatRequestState*>(statePtr);
+
+    const char* textChars = env->GetStringUTFChars(jText, nullptr);
+    std::string text = textChars ? textChars : "";
+    if (textChars) env->ReleaseStringUTFChars(jText, textChars);
+
+    try {
+        common_chat_msg msg = common_chat_parse(text, isPartial == JNI_TRUE, state->parser);
+
+        nlohmann::ordered_json out;
+        out["content"]          = msg.content;
+        out["reasoningContent"] = msg.reasoning_content;
+
+        auto calls = nlohmann::ordered_json::array();
+        for (const auto& tc : msg.tool_calls) {
+            calls.push_back({
+                {"id",        tc.id},
+                {"name",      tc.name},
+                {"arguments", tc.arguments},
+            });
+        }
+        out["toolCalls"] = calls;
+        return env->NewStringUTF(out.dump().c_str());
+    } catch (const std::exception& e) {
+        // A partial parse failing mid-token is expected, not an error worth surfacing.
+        if (isPartial != JNI_TRUE) {
+            set_last_error(std::string("nativeParseChatOutput failed: ") + e.what());
+        }
+        return env->NewStringUTF("{}");
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeChatParams(
+        JNIEnv*, jobject, jlong statePtr) {
+    if (statePtr == 0L) return;
+    delete reinterpret_cast<ChatRequestState*>(statePtr);
 }

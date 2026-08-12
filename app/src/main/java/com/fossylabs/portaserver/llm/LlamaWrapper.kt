@@ -42,4 +42,28 @@ object LlamaWrapper {
         contents: Array<String>,
         addAssistantTurn: Boolean,
     ): String
+
+    // Tool calling. The OpenAI request crosses this boundary as JSON so llama.cpp can
+    // render tools through the model's own template and parse calls back out; mirroring
+    // its per-model formats in Kotlin would duplicate what common/chat.h already does.
+    external fun nativeInitChatTemplates(modelPtr: Long): Long
+    external fun nativeFreeChatTemplates(tmplsPtr: Long)
+    external fun nativeChatTemplateSource(tmplsPtr: Long): String
+
+    external fun nativeBuildChatPrompt(
+        tmplsPtr: Long,
+        messagesJson: String,
+        toolsJson: String?,
+        toolChoice: String?,
+        parallelToolCalls: Boolean,
+        addGenerationPrompt: Boolean,
+    ): Long
+
+    /** JSON: prompt, format, grammar, grammarLazy, grammarTriggers, preservedTokens, additionalStops. */
+    external fun nativeChatPromptInfo(statePtr: Long): String
+
+    /** JSON: content, reasoningContent, toolCalls[{id, name, arguments}]. */
+    external fun nativeParseChatOutput(statePtr: Long, text: String, isPartial: Boolean): String
+
+    external fun nativeFreeChatParams(statePtr: Long)
 }
