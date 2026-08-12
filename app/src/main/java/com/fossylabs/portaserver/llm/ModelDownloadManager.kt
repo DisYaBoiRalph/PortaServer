@@ -3,6 +3,7 @@ package com.fossylabs.portaserver.llm
 import android.app.Application
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.system.Os
 import android.util.Log
 import com.fossylabs.portaserver.notification.DownloadNotifier
 import com.fossylabs.portaserver.settings.SettingsRepository
@@ -23,9 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.io.File
-import java.io.FileInputStream
-import java.io.RandomAccessFile
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -91,6 +90,20 @@ class ModelDownloadManager(
             while (input.read(buf).also { n = it } != -1) digest.update(buf, 0, n)
         }
         return digest.digest().toHexString()
+    }
+
+    /**
+     * Free bytes on the volume backing [fileUri], or null when the provider does not expose a
+     * real descriptor. Cloud-backed providers legitimately cannot answer this.
+     */
+    private fun freeSpaceBytes(fileUri: Uri): Long? = try {
+        resolver.openFileDescriptor(fileUri, "r")?.use { pfd ->
+            val stat = Os.fstatvfs(pfd.fileDescriptor)
+            stat.f_bavail * stat.f_frsize
+        }
+    } catch (e: Exception) {
+        Log.i("ModelDownloadManager", "Could not read free space for $fileUri: ${e.message}")
+        null
     }
 
     private fun findExistingFile(treeUri: Uri, treeDocId: String, fileName: String): Uri? {
@@ -279,6 +292,18 @@ class ModelDownloadManager(
                     }
                 }
 
+                // A ranged download that exhausts the volume fails only after transferring
+                // gigabytes, so check capacity before the first byte rather than after.
+                contentLength?.let { needed ->
+                    val free = freeSpaceBytes(fileUri)
+                    if (free != null && free < needed) {
+                        error(
+                            "Not enough space for $fileName: needs ${needed / (1024 * 1024)} MB, " +
+                                "only ${free / (1024 * 1024)} MB free"
+                        )
+                    }
+                }
+
                 val _cnt = contentLength
                 val runtime = Runtime.getRuntime()
                 val freeHeapBytes = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
@@ -287,100 +312,107 @@ class ModelDownloadManager(
 
                 if (canUseParallel) {
                     val totalLen = _cnt!!
-                    // Parallel ranged download into a temp file in app cache, then copy to SAF
-                    val tempFile = File(application.cacheDir, "$fileName.part")
-                    try {
-                        RandomAccessFile(tempFile, "rw").use { raf -> raf.setLength(totalLen) }
+                    // Ranged writes go straight into the destination. Staging in the app cache
+                    // first needed room for the file twice over and then copied every byte
+                    // again -- rough on a phone that is nearly full, and pointless when SAF can
+                    // hand back a seekable descriptor. Providers are not obliged to, so this
+                    // degrades to a single stream instead of assuming.
+                    val pfd = try {
+                        resolver.openFileDescriptor(fileUri, "rw")
+                    } catch (e: Exception) {
+                        Log.i("ModelDownloadManager", "Destination is not seekable, using sequential download: ${e.message}")
+                        null
+                    }
 
-                        val maxParallelByHeap = when {
-                            freeHeapBytes >= 192L * 1024L * 1024L -> MAX_PARALLEL_RANGES
-                            freeHeapBytes >= 144L * 1024L * 1024L -> 3
-                            else -> 2
-                        }
-                        val concurrency = minOf(maxParallelByHeap, ((totalLen / PARALLEL_MIN_FILE_SIZE_BYTES).toInt()).coerceAtLeast(1))
-                        val chunkSize = (totalLen + concurrency - 1L) / concurrency.toLong()
-                        Log.i("ModelDownloadManager", "Parallel download enabled: concurrency=$concurrency, freeHeapBytes=$freeHeapBytes")
-
-                        val totalAtomic = AtomicLong(0L)
+                    if (pfd == null) {
+                        doSequentialDownload()
+                    } else {
                         var parallelCompleted = false
-
-                        val ranges = mutableListOf<Pair<Long, Long>>()
-                        var pos = 0L
-                        while (pos < totalLen) {
-                            val end = minOf(pos + chunkSize - 1, totalLen - 1)
-                            ranges.add(pos to end)
-                            pos = end + 1
-                        }
-
                         try {
-                            // Download ranges in parallel and write directly into the temp file
-                            java.nio.channels.FileChannel.open(
-                                tempFile.toPath(),
-                                java.nio.file.StandardOpenOption.READ,
-                                java.nio.file.StandardOpenOption.WRITE,
-                            ).use { fc ->
-                            coroutineScope {
-                                val jobs = ranges.map { (start, end) ->
-                                    launch(Dispatchers.IO) {
-                                        val resp = httpClient.get(url) {
-                                            bearer(hfToken)
-                                            headers { append("Range", "bytes=$start-$end") }
+                            pfd.use { descriptor ->
+                                // Fixes the final length so positional writes land at the right
+                                // offsets. This does NOT reserve blocks -- the file is sparse --
+                                // which is why free space is checked separately above.
+                                Os.ftruncate(descriptor.fileDescriptor, totalLen)
+
+                                val maxParallelByHeap = when {
+                                    freeHeapBytes >= 192L * 1024L * 1024L -> MAX_PARALLEL_RANGES
+                                    freeHeapBytes >= 144L * 1024L * 1024L -> 3
+                                    else -> 2
+                                }
+                                val concurrency = minOf(maxParallelByHeap, ((totalLen / PARALLEL_MIN_FILE_SIZE_BYTES).toInt()).coerceAtLeast(1))
+                                val chunkSize = (totalLen + concurrency - 1L) / concurrency.toLong()
+                                Log.i("ModelDownloadManager", "Parallel download enabled: concurrency=$concurrency, freeHeapBytes=$freeHeapBytes")
+
+                                val totalAtomic = AtomicLong(0L)
+
+                                val ranges = mutableListOf<Pair<Long, Long>>()
+                                var pos = 0L
+                                while (pos < totalLen) {
+                                    val end = minOf(pos + chunkSize - 1, totalLen - 1)
+                                    ranges.add(pos to end)
+                                    pos = end + 1
+                                }
+
+                                FileOutputStream(descriptor.fileDescriptor).use { fos ->
+                                    val fc = fos.channel
+                                    coroutineScope {
+                                        val jobs = ranges.map { (start, end) ->
+                                            launch(Dispatchers.IO) {
+                                                // prepareGet/execute streams the body. A plain
+                                                // get() buffers the entire range into memory
+                                                // first, which for four ~100 MB ranges means
+                                                // ~400 MB of heap before a single byte is
+                                                // written.
+                                                httpClient.prepareGet(url) {
+                                                    bearer(hfToken)
+                                                    headers { append("Range", "bytes=$start-$end") }
+                                                }.execute { resp ->
+                                                    if (resp.status.value != 206) {
+                                                        error("Server did not return partial content for range request")
+                                                    }
+                                                    val ch = resp.bodyAsChannel()
+                                                    val buf = ByteArray(IO_BUFFER_SIZE)
+                                                    var writePos = start
+                                                    while (!ch.isClosedForRead) {
+                                                        val r = ch.readAvailable(buf)
+                                                        if (r <= 0) break
+                                                        fc.write(java.nio.ByteBuffer.wrap(buf, 0, r), writePos)
+                                                        writePos += r
+                                                        val tot = totalAtomic.addAndGet(r.toLong())
+                                                        publishProgress(tot, totalLen)
+                                                    }
+                                                }
+                                            }
                                         }
-                                        if (resp.status.value != 206) {
-                                            error("Server did not return partial content for range request")
-                                        }
-                                        val ch = resp.bodyAsChannel()
-                                        val buf = ByteArray(IO_BUFFER_SIZE)
-                                        var pos = start
-                                        while (!ch.isClosedForRead) {
-                                            val r = ch.readAvailable(buf)
-                                            if (r <= 0) break
-                                            fc.write(java.nio.ByteBuffer.wrap(buf, 0, r), pos)
-                                            pos += r
-                                            val tot = totalAtomic.addAndGet(r.toLong())
-                                            publishProgress(tot, totalLen)
-                                        }
+                                        jobs.forEach { it.join() }
                                     }
                                 }
-                                jobs.forEach { it.join() }
-                            }
-                            }
 
-                            totalDownloaded = totalAtomic.get()
-                            publishProgress(totalDownloaded, totalLen, force = true)
-                            parallelCompleted = true
+                                totalDownloaded = totalAtomic.get()
+                                publishProgress(totalDownloaded, totalLen, force = true)
+                                parallelCompleted = true
+                            }
+                        } catch (e: CancellationException) {
+                            throw e  // the user cancelled; not a reason to retry sequentially
                         } catch (oom: OutOfMemoryError) {
                             Log.e("ModelDownloadManager", "OOM during parallel download; falling back to sequential: ${oom.message}")
-                            doSequentialDownload()
                         } catch (e: Exception) {
                             Log.w("ModelDownloadManager", "Parallel range download failed, falling back to sequential: ${e.message}")
+                        }
+
+                        if (!parallelCompleted) {
+                            // openOutputStream truncates, so a partial ranged file is discarded.
                             doSequentialDownload()
-                        }
-
-                        if (parallelCompleted) {
-                            // Compute SHA256 from temp file if required
-                            if (digest != null) {
-                                FileInputStream(tempFile).use { fis ->
-                                    val buf = ByteArray(IO_BUFFER_SIZE)
-                                    var r: Int
-                                    while (fis.read(buf).also { r = it } != -1) digest.update(buf, 0, r)
-                                }
-                            }
-
-                            // Copy temp file to SAF target
-                            FileInputStream(tempFile).use { fis ->
-                                val output = resolver.openOutputStream(fileUri)
-                                    ?: error("Cannot open output stream for download target")
-                                output.use { os ->
-                                    fis.copyTo(os, IO_BUFFER_SIZE)
-                                }
+                        } else if (digest != null) {
+                            // Bytes were written positionally rather than streamed past the
+                            // digest, so it has to come from reading the finished file back.
+                            resolver.openInputStream(fileUri)?.use { input ->
+                                val buf = ByteArray(IO_BUFFER_SIZE)
+                                var r: Int
+                                while (input.read(buf).also { r = it } != -1) digest.update(buf, 0, r)
                             }
                         }
-                    } catch (e: Exception) {
-                        try { DownloadNotifier.cancel(application, notifId) } catch (_: Exception) {}
-                        throw e
-                    } finally {
-                        if (tempFile.exists()) tempFile.delete()
                     }
                 } else {
                     if (_cnt != null && acceptRanges == "bytes" && _cnt > PARALLEL_MIN_FILE_SIZE_BYTES) {
