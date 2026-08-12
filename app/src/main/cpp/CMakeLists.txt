@@ -14,6 +14,12 @@ set(LLAMA_BUILD_TESTS       OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER      OFF CACHE BOOL "" FORCE)
 
+# common carries the chat-template and tool-call machinery (jinja rendering, the PEG
+# parser, json-schema-to-grammar). It is off by default under FetchContent because
+# llama.cpp gates it on LLAMA_STANDALONE. Its dependencies are vendored, so unlike the
+# Vulkan backend it needs nothing installed on the host.
+set(LLAMA_BUILD_COMMON       ON CACHE BOOL "" FORCE)
+
 # Pin to a recent stable release for broader GGUF architecture support
 FetchContent_Declare(
     llama
@@ -37,6 +43,7 @@ target_include_directories(
 
 target_link_libraries(
     llama_bridge
+    llama-common
     llama
     ggml
     android
