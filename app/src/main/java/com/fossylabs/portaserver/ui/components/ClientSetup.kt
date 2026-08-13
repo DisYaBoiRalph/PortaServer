@@ -26,15 +26,18 @@ data class ClientSnippet(
 )
 
 /**
- * Continue needs two entries, not one: `autocomplete` cannot share a model entry with
- * `chat`, and it reaches the legacy completions endpoint via
+ * Continue needs separate entries per role: `autocomplete` cannot share a model entry
+ * with `chat`, and it reaches the legacy completions endpoint via
  * `useLegacyCompletionsEndpoint`.
+ *
+ * There is deliberately no `agent` entry -- Continue has no such role. Agent mode runs on
+ * the `chat` model, so tool calling works through the entry below without extra config.
  */
 fun ClientSetup.continueSnippet(): ClientSnippet = ClientSnippet(
     title = "Continue.dev",
     filePath = "~/.continue/config.yaml",
     language = "yaml",
-    note = "Two entries: autocomplete must be its own model entry.",
+    note = "Agent mode uses the chat entry. Autocomplete and embeddings need their own.",
     body = """
         name: PortaServer
         version: 0.0.1
@@ -53,6 +56,12 @@ fun ClientSetup.continueSnippet(): ClientSnippet = ClientSnippet(
             apiKey: portaserver
             roles: [autocomplete]
             useLegacyCompletionsEndpoint: true
+          - name: PortaServer (embed)
+            provider: openai
+            model: $modelName
+            apiBase: $apiBase
+            apiKey: portaserver
+            roles: [embed]
     """.trimIndent(),
 )
 
@@ -65,7 +74,7 @@ fun ClientSetup.openCodeSnippet(): ClientSnippet = ClientSnippet(
     title = "OpenCode",
     filePath = "~/.config/opencode/opencode.json",
     language = "json",
-    note = "Limits match the server's configured context and max tokens.",
+    note = "Limits match the server's configured context and max tokens. Tool calling is automatic.",
     body = """
         {
           "${'$'}schema": "https://opencode.ai/config.json",
