@@ -386,6 +386,23 @@ object LlmInferenceEngine {
         return common
     }
 
+    /**
+     * Embeds each input with the currently loaded model.
+     *
+     * Takes the same lock as generation: embedding builds its own context but still reads
+     * the model, which must not be freed underneath it.
+     */
+    suspend fun embed(inputs: List<String>, nThreads: Int): List<FloatArray> =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                check(modelPtr != 0L) { "No model loaded" }
+                inputs.map { text ->
+                    LlamaWrapper.nativeEmbed(modelPtr, text, nThreads)
+                        ?: error(withNativeDetail("Failed to embed input"))
+                }
+            }
+        }
+
     suspend fun unloadModel() {
         withContext(Dispatchers.IO) {
             mutex.withLock {

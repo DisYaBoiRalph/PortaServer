@@ -295,3 +295,33 @@ data class ToolCallFunctionDelta(
     val name: String? = null,
     val arguments: String? = null,
 )
+
+// ── Embeddings ───────────────────────────────────────────────────────────────
+
+/** OpenAI allows `input` to be a string or an array of strings; both are accepted. */
+@Serializable
+data class EmbeddingsRequest(
+    val model: String = "",
+    val input: JsonElement,
+)
+
+@Serializable
+data class EmbeddingData(
+    val `object`: String = "embedding",
+    val index: Int,
+    val embedding: List<Float>,
+)
+
+@Serializable
+data class EmbeddingsUsage(
+    @SerialName("prompt_tokens") val promptTokens: Int = 0,
+    @SerialName("total_tokens") val totalTokens: Int = 0,
+)
+
+@Serializable
+data class EmbeddingsResponse(
+    val `object`: String = "list",
+    val data: List<EmbeddingData>,
+    val model: String,
+    val usage: EmbeddingsUsage = EmbeddingsUsage(),
+)

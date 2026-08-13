@@ -15,6 +15,7 @@ import io.ktor.server.routing.post
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -167,6 +168,46 @@ fun Route.llmRoutes() {
         }
     }
 
+
+    // Lets a client index a codebase against the same server. A chat model is a mediocre
+    // embedder -- a dedicated embedding GGUF is much better -- but the endpoint existing at
+    // all is what makes retrieval features reachable.
+    post("/v1/embeddings") {
+        val request = call.receive<EmbeddingsRequest>()
+        val modelName = call.readyModelName() ?: return@post
+
+        val inputs = when (val input = request.input) {
+            is JsonArray -> input.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            is JsonPrimitive -> listOfNotNull(input.contentOrNull)
+            else -> emptyList()
+        }
+        if (inputs.isEmpty()) {
+            call.respond(
+                HttpStatusCode.BadRequest,
+                mapOf("error" to mapOf(
+                    "message" to "input must be a string or an array of strings",
+                    "type" to "invalid_request_error",
+                )),
+            )
+            return@post
+        }
+
+        // Mirrors the load-time thread default; embedding builds its own short-lived
+        // context, so it does not inherit the generation context's thread count.
+        val threads = maxOf(1, Runtime.getRuntime().availableProcessors() / 2)
+        val vectors = LlmInferenceEngine.embed(inputs, threads)
+        call.respondText(
+            apiJson.encodeToString(
+                EmbeddingsResponse(
+                    data = vectors.mapIndexed { index, vector ->
+                        EmbeddingData(index = index, embedding = vector.toList())
+                    },
+                    model = modelName,
+                )
+            ),
+            ContentType.Application.Json,
+        )
+    }
 
     post("/v1/completions") {
         val request = call.receive<CompletionRequest>()

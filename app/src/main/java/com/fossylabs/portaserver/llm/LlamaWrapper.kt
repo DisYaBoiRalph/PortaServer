@@ -35,6 +35,9 @@ object LlamaWrapper {
     external fun nativeIsEog(modelPtr: Long, token: Int): Boolean
     external fun nativeNCtx(ctxPtr: Long): Int
 
+    /** Mean-pooled embedding for [text], or null if it could not be produced. */
+    external fun nativeEmbed(modelPtr: Long, text: String, nThreads: Int): FloatArray?
+
     // KV cache
     external fun nativeKvCacheClear(ctxPtr: Long)
 

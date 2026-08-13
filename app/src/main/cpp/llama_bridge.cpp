@@ -1011,3 +1011,78 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeDiffChatOutput(
         return env->NewStringUTF("[]");
     }
 }
+
+/**
+ * Computes a mean-pooled embedding for [jText].
+ *
+ * Pooling is fixed when a context is created, so this cannot share the generation context
+ * and builds a short-lived one instead. That costs a little per call but avoids pinning a
+ * second context's memory for the lifetime of the app, which matters more on a phone.
+ *
+ * Returns null on failure; an empty array would be indistinguishable from a real result.
+ */
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeEmbed(
+        JNIEnv* env, jobject, jlong modelPtr, jstring jText, jint nThreads) {
+
+    auto* model = reinterpret_cast<llama_model*>(modelPtr);
+    if (model == nullptr) return nullptr;
+
+    const char* textChars = env->GetStringUTFChars(jText, nullptr);
+    std::string text = textChars ? textChars : "";
+    if (textChars) env->ReleaseStringUTFChars(jText, textChars);
+
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+    std::vector<llama_token> tokens(text.size() + 8);
+    int n = llama_tokenize(vocab, text.c_str(), (int)text.size(),
+                           tokens.data(), (int)tokens.size(), true, false);
+    if (n < 0) {
+        tokens.resize(-n);
+        n = llama_tokenize(vocab, text.c_str(), (int)text.size(),
+                           tokens.data(), (int)tokens.size(), true, false);
+    }
+    if (n <= 0) {
+        set_last_error("nativeEmbed: tokenization produced no tokens");
+        return nullptr;
+    }
+    tokens.resize(n);
+
+    llama_context_params cparams = llama_context_default_params();
+    cparams.n_ctx        = (uint32_t)n + 8;
+    cparams.n_batch      = (uint32_t)n + 8;
+    cparams.n_threads    = (uint32_t)(nThreads > 0 ? nThreads : 4);
+    cparams.embeddings   = true;
+    cparams.pooling_type = LLAMA_POOLING_TYPE_MEAN;
+
+    llama_context* ctx = llama_init_from_model(model, cparams);
+    if (ctx == nullptr) {
+        set_last_error("nativeEmbed: could not create embedding context");
+        return nullptr;
+    }
+
+    jfloatArray result = nullptr;
+    llama_batch batch = llama_batch_get_one(tokens.data(), (int32_t)tokens.size());
+    // llama_encode is for encoder models only. A decoder-only model such as Qwen has no
+    // encoder graph, and calling it there dereferences a null KV cache context and
+    // segfaults rather than returning an error.
+    const int rc = llama_model_has_encoder(model)
+            ? llama_encode(ctx, batch)
+            : llama_decode(ctx, batch);
+    if (rc == 0) {
+        const float* embd = llama_get_embeddings_seq(ctx, 0);
+        if (embd != nullptr) {
+            const int nEmbd = llama_model_n_embd(model);
+            result = env->NewFloatArray(nEmbd);
+            if (result != nullptr) {
+                env->SetFloatArrayRegion(result, 0, nEmbd, embd);
+            }
+        } else {
+            set_last_error("nativeEmbed: model returned no sequence embedding");
+        }
+    } else {
+        set_last_error("nativeEmbed: llama_encode failed");
+    }
+
+    llama_free(ctx);
+    return result;
+}
