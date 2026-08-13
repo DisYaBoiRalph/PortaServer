@@ -17,6 +17,7 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.routing
+import kotlinx.serialization.json.Json
 
 class KtorServer(
     private val llmPort: Int,
@@ -46,7 +47,16 @@ class KtorServer(
 
     /** Shared plugin/monitoring setup applied identically to both engines. */
     private fun Application.configure(label: String, routes: Route.() -> Unit) {
-        install(ContentNegotiation) { json() }
+        install(ContentNegotiation) {
+            json(
+                Json {
+                    ignoreUnknownKeys = true
+                    encodeDefaults = true
+                    explicitNulls = false
+                    isLenient = true
+                }
+            )
+        }
         // The server is reached from arbitrary origins — browser front-ends, web-based
         // playgrounds, and tunnelled clients — none of which are known ahead of time.
         install(CORS) {

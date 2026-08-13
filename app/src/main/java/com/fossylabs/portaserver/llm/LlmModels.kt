@@ -325,3 +325,17 @@ data class EmbeddingsResponse(
     val model: String,
     val usage: EmbeddingsUsage = EmbeddingsUsage(),
 )
+
+/**
+ * Raised when a request's prompt cannot fit the context the model was loaded with.
+ *
+ * Surfaced as a 400 rather than a 500: the request is the problem, and the caller can act
+ * on it by shortening the conversation or the server operator can raise the context.
+ */
+class PromptTooLongException(
+    val promptTokens: Int,
+    val contextTokens: Int,
+) : Exception(
+    "Prompt is $promptTokens tokens but the model was loaded with a $contextTokens-token " +
+        "context. Raise 'Context length' in Settings and reload the model, or send less history."
+)

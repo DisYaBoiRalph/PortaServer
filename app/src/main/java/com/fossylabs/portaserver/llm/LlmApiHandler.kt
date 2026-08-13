@@ -18,7 +18,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 // Both flags are load-bearing for OpenAI wire compatibility:
 //   encodeDefaults  — `object` and `index` carry default values and clients expect them
@@ -32,6 +35,36 @@ private val apiJson = Json {
     encodeDefaults = true
     explicitNulls = false
 }
+
+/**
+ * Answers a request that cannot fit the loaded context with 400 rather than letting it
+ * reach llama_decode, which aborts the process instead of failing.
+ */
+private suspend fun ApplicationCall.respondPromptTooLong(e: PromptTooLongException) {
+    respond(
+        HttpStatusCode.BadRequest,
+        mapOf("error" to mapOf(
+            "message" to (e.message ?: "Prompt exceeds the model context"),
+            "type" to "invalid_request_error",
+            "code" to "context_length_exceeded",
+        )),
+    )
+}
+
+/**
+ * The same error as [respondPromptTooLong], shaped as an SSE event.
+ *
+ * A stream that has already sent `200 OK` cannot be turned into a 400, so the failure has
+ * to travel in-band. Clients following the OpenAI stream shape surface an `error` event
+ * rather than mistaking a cut-off stream for a complete reply.
+ */
+private fun promptTooLongEvent(e: PromptTooLongException): String = buildJsonObject {
+    putJsonObject("error") {
+        put("message", e.message ?: "Prompt exceeds the model context")
+        put("type", "invalid_request_error")
+        put("code", "context_length_exceeded")
+    }
+}.toString()
 
 fun Route.llmRoutes() {
 
@@ -101,6 +134,21 @@ fun Route.llmRoutes() {
         }
 
         if (stream) {
+            // The status line goes out before the first token, so a prompt that cannot
+            // fit has to be caught before the stream opens. This renders and tokenizes
+            // the prompt a second time, which is cheap next to decoding it.
+            try {
+                LlmInferenceEngine.ensureChatPromptFits(
+                    messagesJson = request.messages.toString(),
+                    toolsJson = request.tools?.toString(),
+                    toolChoice = request.toolChoice.toToolChoiceName(),
+                    parallelToolCalls = request.parallelToolCalls == true,
+                )
+            } catch (e: PromptTooLongException) {
+                call.respondPromptTooLong(e)
+                return@post
+            }
+
             call.respondBytesWriter(
                 contentType = ContentType.parse("text/event-stream; charset=utf-8"),
                 status = HttpStatusCode.OK,
@@ -118,25 +166,34 @@ fun Route.llmRoutes() {
                 // Without tools the raw pieces are the content and can go out as they
                 // arrive. With tools the reply is re-parsed each token instead, because a
                 // half-written <tool_call> block is not something a client can act on.
-                val result = if (hasTools) {
-                    generation({ }) { deltas ->
-                        for (delta in deltas) {
-                            val toolCalls = delta.toWireDelta()?.let { listOf(it) }
-                            if (delta.content.isEmpty() && toolCalls == null) continue
-                            val piece = CompletionDelta(
-                                content = delta.content.takeIf { it.isNotEmpty() },
-                                toolCalls = toolCalls,
-                            )
+                val result = try {
+                    if (hasTools) {
+                        generation({ }) { deltas ->
+                            for (delta in deltas) {
+                                val toolCalls = delta.toWireDelta()?.let { listOf(it) }
+                                if (delta.content.isEmpty() && toolCalls == null) continue
+                                val piece = CompletionDelta(
+                                    content = delta.content.takeIf { it.isNotEmpty() },
+                                    toolCalls = toolCalls,
+                                )
+                                writeStringUtf8("data: " + chunk(CompletionChoice(delta = piece)) + "\n\n")
+                                flush()
+                            }
+                        }
+                    } else {
+                        generation({ token ->
+                            val piece = CompletionDelta(content = token)
                             writeStringUtf8("data: " + chunk(CompletionChoice(delta = piece)) + "\n\n")
                             flush()
-                        }
+                        }, null)
                     }
-                } else {
-                    generation({ token ->
-                        val piece = CompletionDelta(content = token)
-                        writeStringUtf8("data: " + chunk(CompletionChoice(delta = piece)) + "\n\n")
-                        flush()
-                    }, null)
+                } catch (e: PromptTooLongException) {
+                    // Only reachable when the model was reloaded with a smaller context
+                    // between the check above and this generation.
+                    writeStringUtf8("data: ${promptTooLongEvent(e)}\n\n")
+                    writeStringUtf8("data: [DONE]\n\n")
+                    flush()
+                    return@respondBytesWriter
                 }
 
                 writeStringUtf8(
@@ -146,7 +203,12 @@ fun Route.llmRoutes() {
                 flush()
             }
         } else {
-            val result = generation({ }, null)
+            val result = try {
+                generation({ }, null)
+            } catch (e: PromptTooLongException) {
+                call.respondPromptTooLong(e)
+                return@post
+            }
             call.respondText(
                 apiJson.encodeToString(
                     ChatCompletionResponse(
@@ -301,6 +363,14 @@ private suspend fun ApplicationCall.respondGeneration(
     encodeFinal: (text: String) -> String,
 ) {
     if (stream) {
+        // Same as the chat route: the status is committed before the first token.
+        try {
+            LlmInferenceEngine.ensurePromptFits(messages)
+        } catch (e: PromptTooLongException) {
+            respondPromptTooLong(e)
+            return
+        }
+
         respondBytesWriter(
             contentType = ContentType.parse("text/event-stream; charset=utf-8"),
             status = HttpStatusCode.OK,
@@ -309,16 +379,28 @@ private suspend fun ApplicationCall.respondGeneration(
                 writeStringUtf8("data: $primer\n\n")
                 flush()
             }
-            LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { token ->
-                writeStringUtf8("data: ${encodeChunk(token)}\n\n")
+            try {
+                LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { token ->
+                    writeStringUtf8("data: ${encodeChunk(token)}\n\n")
+                    flush()
+                }
+            } catch (e: PromptTooLongException) {
+                writeStringUtf8("data: ${promptTooLongEvent(e)}\n\n")
+                writeStringUtf8("data: [DONE]\n\n")
                 flush()
+                return@respondBytesWriter
             }
             writeStringUtf8("data: [DONE]\n\n")
             flush()
         }
     } else {
         val sb = StringBuilder()
-        LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { sb.append(it) }
+        try {
+            LlmInferenceEngine.generate(messages, maxTokens, temperature, topP) { sb.append(it) }
+        } catch (e: PromptTooLongException) {
+            respondPromptTooLong(e)
+            return
+        }
         respondText(encodeFinal(sb.toString()), ContentType.Application.Json)
     }
 }

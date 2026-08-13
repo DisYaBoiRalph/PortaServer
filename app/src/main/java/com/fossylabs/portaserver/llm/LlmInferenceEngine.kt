@@ -17,6 +17,9 @@ object LlmInferenceEngine {
 
     private const val TAG = "LlmInferenceEngine"
 
+    /** Prompt tokens decoded per llama_decode call; comfortably under any default n_batch. */
+    private const val DECODE_BATCH_TOKENS = 256
+
     private val mutex = Mutex()
 
     /** Decodes the JSON the native chat bridge returns. */
@@ -169,18 +172,7 @@ object LlmInferenceEngine {
 
             LogRepository.log(LogLevel.INFO, "Generation started (${messages.size} messages, max $maxTokens tokens)")
 
-            // Build prompt using the model's built-in chat template (falls back to ChatML)
-            val roles = messages.map { it.role }.toTypedArray()
-            val contents = messages.map { it.content }.toTypedArray()
-            val prompt = try {
-                LlamaWrapper.nativeApplyChatTemplate(modelPtr, roles, contents, true)
-                    .takeIf { it.isNotEmpty() }
-            } catch (_: Exception) { null } ?: buildString {
-                messages.forEach { msg ->
-                    append("<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n")
-                }
-                append("<|im_start|>assistant\n")
-            }
+            val prompt = buildLegacyPrompt(messages)
 
             LlamaWrapper.nativeKvCacheClear(ctxPtr)
             nPast = 0
@@ -189,6 +181,7 @@ object LlmInferenceEngine {
             cachedPromptTokens = IntArray(0)
 
             val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, prompt, true, parseSpecial = true)
+            requirePromptFits(promptTokens.size)
             val decodeOk = LlamaWrapper.nativeDecode(ctxPtr, promptTokens, nPast)
             check(decodeOk) { "Failed to decode prompt" }
             nPast += promptTokens.size
@@ -273,13 +266,13 @@ object LlmInferenceEngine {
 
                 val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, info.prompt, true, parseSpecial = true)
 
+                // llama_decode aborts the process when the prompt does not fit, so this
+                // has to be rejected here rather than discovered down in ggml.
+                requirePromptFits(promptTokens.size)
+
                 val promptStart = System.currentTimeMillis()
                 val reused = reusePromptPrefix(promptTokens)
-                if (reused < promptTokens.size) {
-                    val suffix = promptTokens.copyOfRange(reused, promptTokens.size)
-                    check(LlamaWrapper.nativeDecode(ctxPtr, suffix, nPast)) { "Failed to decode prompt" }
-                    nPast += suffix.size
-                }
+                decodeInBatches(promptTokens, reused)
                 cachedPromptTokens = promptTokens
                 val promptMs = System.currentTimeMillis() - promptStart
 
@@ -358,6 +351,105 @@ object LlmInferenceEngine {
                 LlamaWrapper.nativeFreeChatParams(statePtr)
                 LlamaWrapper.nativeFreeChatSampler(activeSamplerPtr)
             }
+        }
+    }
+
+    /**
+     * Renders a chat request through the model's template and rejects it before any
+     * generation starts if the prompt cannot fit the loaded context.
+     *
+     * A streaming response commits `200 OK` before its first token, so this has to run
+     * before the stream opens -- once it is open there is no status left to set, and the
+     * client sees a truncated success instead of an error. [generateChat] still checks for
+     * itself; this only moves the failure early enough to report it properly.
+     */
+    suspend fun ensureChatPromptFits(
+        messagesJson: String,
+        toolsJson: String?,
+        toolChoice: String?,
+        parallelToolCalls: Boolean,
+    ) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            check(modelPtr != 0L && ctxPtr != 0L) { "No model loaded" }
+            check(chatTemplatesPtr != 0L) { "Model has no chat template" }
+
+            val statePtr = LlamaWrapper.nativeBuildChatPrompt(
+                chatTemplatesPtr,
+                messagesJson,
+                toolsJson,
+                toolChoice,
+                parallelToolCalls,
+                true,
+            )
+            if (statePtr == 0L) error(withNativeDetail("Failed to build chat prompt"))
+            try {
+                val info = nativeJson.decodeFromString<NativeChatPromptInfo>(
+                    LlamaWrapper.nativeChatPromptInfo(statePtr)
+                )
+                requirePromptFits(
+                    LlamaWrapper.nativeTokenize(modelPtr, info.prompt, true, parseSpecial = true).size
+                )
+            } finally {
+                LlamaWrapper.nativeFreeChatParams(statePtr)
+            }
+        }
+    }
+
+    /** [ensureChatPromptFits] for the legacy path, which renders its prompt differently. */
+    suspend fun ensurePromptFits(messages: List<ChatMessage>) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            check(modelPtr != 0L && ctxPtr != 0L) { "No model loaded" }
+            requirePromptFits(
+                LlamaWrapper.nativeTokenize(
+                    modelPtr, buildLegacyPrompt(messages), true, parseSpecial = true
+                ).size
+            )
+        }
+    }
+
+    /** Renders [messages] with the model's built-in chat template, falling back to ChatML. */
+    private fun buildLegacyPrompt(messages: List<ChatMessage>): String {
+        val roles = messages.map { it.role }.toTypedArray()
+        val contents = messages.map { it.content }.toTypedArray()
+        return try {
+            LlamaWrapper.nativeApplyChatTemplate(modelPtr, roles, contents, true)
+                .takeIf { it.isNotEmpty() }
+        } catch (_: Exception) { null } ?: buildString {
+            messages.forEach { msg ->
+                append("<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n")
+            }
+            append("<|im_start|>assistant\n")
+        }
+    }
+
+    /**
+     * Rejects a prompt that cannot fit the loaded context.
+     *
+     * llama_decode calls ggml_abort in this case, which kills the process rather than
+     * failing the request -- an agentic client with a large system prompt would take the
+     * whole server down. One slot is reserved for the token being generated.
+     */
+    private fun requirePromptFits(promptTokens: Int) {
+        val contextSize = LlamaWrapper.nativeNCtx(ctxPtr)
+        if (contextSize > 0 && promptTokens >= contextSize) {
+            throw PromptTooLongException(promptTokens, contextSize)
+        }
+    }
+
+    /**
+     * Decodes the prompt suffix in batches.
+     *
+     * A single oversized batch is the other way to reach the same abort, so the work is
+     * split into chunks that any sane n_batch accommodates.
+     */
+    private fun decodeInBatches(promptTokens: IntArray, from: Int) {
+        var offset = from
+        while (offset < promptTokens.size) {
+            val end = minOf(offset + DECODE_BATCH_TOKENS, promptTokens.size)
+            val chunk = promptTokens.copyOfRange(offset, end)
+            check(LlamaWrapper.nativeDecode(ctxPtr, chunk, nPast)) { "Failed to decode prompt" }
+            nPast += chunk.size
+            offset = end
         }
     }
 
