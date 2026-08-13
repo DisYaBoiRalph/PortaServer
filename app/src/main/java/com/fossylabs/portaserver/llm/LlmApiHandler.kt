@@ -15,6 +15,9 @@ import io.ktor.server.routing.post
 import io.ktor.utils.io.writeStringUtf8
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 // Both flags are load-bearing for OpenAI wire compatibility:
 //   encodeDefaults  — `object` and `index` carry default values and clients expect them
@@ -70,43 +73,87 @@ fun Route.llmRoutes() {
 
         val requestId = "chatcmpl-${System.currentTimeMillis()}"
         val created = System.currentTimeMillis() / 1_000L
+        val stream = request.stream == true
 
-        call.respondGeneration(
-            messages = request.messages.map { ChatMessage(it.role, it.content) },
-            maxTokens = request.maxTokens ?: InferenceDefaults.maxTokens,
-            temperature = request.temperature ?: InferenceDefaults.temperature,
-            topP = request.topP ?: InferenceDefaults.topP,
-            stream = request.stream == true,
-            // The chat stream opens with a role-only delta before any content.
-            primer = apiJson.encodeToString(
-                ChatCompletionChunk(
-                    id = requestId, created = created, model = modelName,
-                    choices = listOf(CompletionChoice(delta = CompletionDelta(role = "assistant"))),
-                )
-            ),
-            encodeChunk = { token ->
-                apiJson.encodeToString(
+        // Tool-call syntax only becomes meaningful once the whole reply is parsed, so a
+        // tool-enabled request cannot forward raw pieces as they arrive. Incremental
+        // tool_calls deltas come later; for now such a request is buffered and flushed as
+        // one chunk, which keeps streaming clients working rather than silently dropping
+        // the calls they asked for.
+        val hasTools = !request.tools.isNullOrEmpty()
+
+        val generation: suspend (suspend (String) -> Unit) -> ChatGeneration = { onToken ->
+            LlmInferenceEngine.generateChat(
+                messagesJson = request.messages.toString(),
+                toolsJson = request.tools?.toString(),
+                toolChoice = request.toolChoice.toToolChoiceName(),
+                parallelToolCalls = request.parallelToolCalls == true,
+                maxTokens = request.maxTokens ?: InferenceDefaults.maxTokens,
+                temperature = request.temperature ?: InferenceDefaults.temperature,
+                topP = request.topP ?: InferenceDefaults.topP,
+                onToken = onToken,
+            )
+        }
+
+        if (stream) {
+            call.respondBytesWriter(
+                contentType = ContentType.parse("text/event-stream; charset=utf-8"),
+                status = HttpStatusCode.OK,
+            ) {
+                fun chunk(choice: CompletionChoice) = apiJson.encodeToString(
                     ChatCompletionChunk(
                         id = requestId, created = created, model = modelName,
-                        choices = listOf(CompletionChoice(delta = CompletionDelta(content = token))),
+                        choices = listOf(choice),
                     )
                 )
-            },
-            encodeFinal = { text ->
+
+                writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(role = "assistant")))}\n\n")
+                flush()
+
+                val result = generation { token ->
+                    if (!hasTools) {
+                        writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(content = token)))}\n\n")
+                        flush()
+                    }
+                }
+
+                if (hasTools && result.content.isNotEmpty()) {
+                    writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(content = result.content)))}\n\n")
+                    flush()
+                }
+                if (result.toolCalls.isNotEmpty()) {
+                    writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(toolCalls = result.toolCalls.toWireCalls())))}\n\n")
+                    flush()
+                }
+                writeStringUtf8(
+                    "data: ${chunk(CompletionChoice(finishReason = result.finishReason()))}\n\n"
+                )
+                writeStringUtf8("data: [DONE]\n\n")
+                flush()
+            }
+        } else {
+            val result = generation { }
+            call.respondText(
                 apiJson.encodeToString(
                     ChatCompletionResponse(
                         id = requestId, created = created, model = modelName,
                         choices = listOf(
                             CompletionChoice(
-                                message = CompletionMessage(role = "assistant", content = text),
-                                finishReason = "stop",
+                                message = CompletionMessage(
+                                    role = "assistant",
+                                    content = result.content,
+                                    toolCalls = result.toolCalls.takeIf { it.isNotEmpty() }?.toWireCalls(),
+                                ),
+                                finishReason = result.finishReason(),
                             )
                         ),
                     )
-                )
-            },
-        )
+                ),
+                ContentType.Application.Json,
+            )
+        }
     }
+
 
     post("/v1/completions") {
         val request = call.receive<CompletionRequest>()
@@ -221,3 +268,23 @@ private suspend fun ApplicationCall.respondGeneration(
         respondText(encodeFinal(sb.toString()), ContentType.Application.Json)
     }
 }
+
+/** OpenAI allows a string or a {type, function:{name}} object; the object form pins one
+ * function, which maps to "required" here since the native side takes a mode, not a name. */
+private fun JsonElement?.toToolChoiceName(): String? = when (this) {
+    null -> null
+    is JsonPrimitive -> contentOrNull
+    else -> "required"
+}
+
+private fun List<NativeToolCall>.toWireCalls(): List<ToolCall> = mapIndexed { index, call ->
+    ToolCall(
+        // Clients key tool results by this id, so it must be present even when the
+        // model format does not carry one of its own.
+        id = call.id.ifEmpty { "call_$index" },
+        function = ToolCallFunction(name = call.name, arguments = call.arguments),
+    )
+}
+
+private fun ChatGeneration.finishReason(): String =
+    if (toolCalls.isNotEmpty()) "tool_calls" else "stop"

@@ -376,7 +376,8 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeContext(
 
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeTokenize(
-        JNIEnv* env, jobject, jlong modelPtr, jstring jText, jboolean addBos) {
+        JNIEnv* env, jobject, jlong modelPtr, jstring jText, jboolean addBos,
+        jboolean parseSpecial) {
 
     const char* text = env->GetStringUTFChars(jText, nullptr);
     if (!text) {
@@ -385,16 +386,24 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeTokenize(
     auto* model = reinterpret_cast<llama_model*>(modelPtr);
     const llama_vocab* vocab = llama_model_get_vocab(model);
 
+    // parse_special must be on for a chat-templated prompt: its <|im_start|> and
+    // <|im_end|> markers are plain text at this point, and tokenizing them literally
+    // means the model never sees real turn boundaries -- it then reproduces the
+    // terminator as text instead of emitting an end-of-generation token, so generation
+    // does not stop. It stays off for raw prompts so caller text cannot inject control
+    // tokens.
+    const bool parse_special = parseSpecial == JNI_TRUE;
+
     // Estimate upper bound
     int n_max = strlen(text) + 256;
     std::vector<llama_token> tokens(n_max);
     int n = llama_tokenize(vocab, text, (int)strlen(text),
-                           tokens.data(), n_max, addBos, false);
+                           tokens.data(), n_max, addBos, parse_special);
 
     if (n < 0) {
         tokens.resize(-n);
         n = llama_tokenize(vocab, text, (int)strlen(text),
-                           tokens.data(), -n, addBos, false);
+                           tokens.data(), -n, addBos, parse_special);
     }
     env->ReleaseStringUTFChars(jText, text);
 
@@ -482,6 +491,18 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeEosToken(
         JNIEnv*, jobject, jlong modelPtr) {
     const llama_vocab* vocab = llama_model_get_vocab(reinterpret_cast<llama_model*>(modelPtr));
     return (jint)llama_vocab_eos(vocab);
+}
+
+/**
+ * Whether [token] ends generation. Models often have several such tokens -- Qwen stops on
+ * <|im_end|>, which is not the vocab EOS -- so comparing against a single id lets the
+ * terminator through as literal text in the reply.
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeIsEog(
+        JNIEnv*, jobject, jlong modelPtr, jint token) {
+    const llama_vocab* vocab = llama_model_get_vocab(reinterpret_cast<llama_model*>(modelPtr));
+    return llama_vocab_is_eog(vocab, (llama_token)token) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jint JNICALL

@@ -17,7 +17,7 @@ object LlamaWrapper {
     external fun nativeFreeContext(ctxPtr: Long)
 
     // Tokenization
-    external fun nativeTokenize(modelPtr: Long, text: String, addBos: Boolean): IntArray
+    external fun nativeTokenize(modelPtr: Long, text: String, addBos: Boolean, parseSpecial: Boolean): IntArray
 
     // Decoding
     external fun nativeDecode(ctxPtr: Long, tokens: IntArray, nPast: Int): Boolean
@@ -30,6 +30,9 @@ object LlamaWrapper {
     // Token utilities
     external fun nativeTokenToString(modelPtr: Long, token: Int): String
     external fun nativeEosToken(modelPtr: Long): Int
+
+    /** True when the token ends generation; covers every EOG token, not just vocab EOS. */
+    external fun nativeIsEog(modelPtr: Long, token: Int): Boolean
     external fun nativeNCtx(ctxPtr: Long): Int
 
     // KV cache

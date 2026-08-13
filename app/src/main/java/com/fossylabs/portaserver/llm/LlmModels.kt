@@ -2,6 +2,8 @@ package com.fossylabs.portaserver.llm
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 
 // ── Model discovery ──────────────────────────────────────────────────────────
 
@@ -50,10 +52,18 @@ data class ChatMessage(
 
 // ── OpenAI-compatible wire types ─────────────────────────────────────────────
 
+/**
+ * Messages and tools stay as raw JSON: llama.cpp renders and parses them itself, and a
+ * role/content DTO cannot carry `tool_calls` on an assistant turn or `tool_call_id` on a
+ * tool result -- both of which agentic clients replay on every subsequent request.
+ */
 @Serializable
 data class ChatCompletionRequest(
     val model: String = "",
-    val messages: List<ChatCompletionMessageDto>,
+    val messages: JsonArray,
+    val tools: JsonArray? = null,
+    @SerialName("tool_choice") val toolChoice: JsonElement? = null,
+    @SerialName("parallel_tool_calls") val parallelToolCalls: Boolean? = null,
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val stream: Boolean? = null,
     val temperature: Float? = null,
@@ -61,9 +71,17 @@ data class ChatCompletionRequest(
 )
 
 @Serializable
-data class ChatCompletionMessageDto(
-    val role: String,
-    val content: String,
+data class ToolCallFunction(
+    val name: String,
+    /** JSON object encoded as a string, as the OpenAI schema specifies. */
+    val arguments: String,
+)
+
+@Serializable
+data class ToolCall(
+    val id: String,
+    val type: String = "function",
+    val function: ToolCallFunction,
 )
 
 @Serializable
@@ -87,12 +105,14 @@ data class CompletionChoice(
 data class CompletionMessage(
     val role: String,
     val content: String,
+    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
 )
 
 @Serializable
 data class CompletionDelta(
     val role: String? = null,
     val content: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
 )
 
 @Serializable
@@ -182,4 +202,46 @@ data class HuggingFaceFileDto(
 data class HuggingFaceModelDetailDto(
     @SerialName("modelId") val modelId: String = "",
     val siblings: List<HuggingFaceFileDto> = emptyList(),
+)
+
+// ── Native chat bridge DTOs ──────────────────────────────────────────────────
+// Shapes emitted by llama_bridge.cpp; see LlamaWrapper.nativeChatPromptInfo and
+// nativeParseChatOutput.
+
+@Serializable
+data class NativeGrammarTrigger(
+    val type: String = "",
+    val value: String = "",
+    val token: Int = -1,
+)
+
+@Serializable
+data class NativeChatPromptInfo(
+    val prompt: String = "",
+    val format: String = "",
+    val grammar: String = "",
+    val grammarLazy: Boolean = false,
+    val grammarTriggers: List<NativeGrammarTrigger> = emptyList(),
+    val preservedTokens: List<String> = emptyList(),
+    val additionalStops: List<String> = emptyList(),
+)
+
+@Serializable
+data class NativeToolCall(
+    val id: String = "",
+    val name: String = "",
+    val arguments: String = "",
+)
+
+@Serializable
+data class NativeParsedChat(
+    val content: String = "",
+    val reasoningContent: String = "",
+    val toolCalls: List<NativeToolCall> = emptyList(),
+)
+
+/** Outcome of a chat generation: assistant text plus any structured tool calls. */
+data class ChatGeneration(
+    val content: String,
+    val toolCalls: List<NativeToolCall>,
 )

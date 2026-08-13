@@ -1,5 +1,6 @@
 package com.fossylabs.portaserver.llm
 
+import android.util.Log
 import com.fossylabs.portaserver.server.LogLevel
 import com.fossylabs.portaserver.server.LogRepository
 import kotlinx.coroutines.Dispatchers
@@ -9,15 +10,22 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import java.io.File
 
 object LlmInferenceEngine {
 
+    private const val TAG = "LlmInferenceEngine"
+
     private val mutex = Mutex()
+
+    /** Decodes the JSON the native chat bridge returns. */
+    private val nativeJson = Json { ignoreUnknownKeys = true }
 
     private var modelPtr: Long = 0L
     private var ctxPtr: Long = 0L
     private var samplerPtr: Long = 0L
+    private var chatTemplatesPtr: Long = 0L
     private var nPast: Int = 0
 
     private val _loadedModel = MutableStateFlow<ModelInfo?>(null)
@@ -105,6 +113,21 @@ object LlmInferenceEngine {
                 }
                 nPast = 0
 
+                // Read once per model: the tool-call format is a property of the GGUF's
+                // own template. A model without one still serves plain chat, so a failure
+                // here is not fatal.
+                chatTemplatesPtr = try {
+                    LlamaWrapper.nativeInitChatTemplates(modelPtr)
+                } catch (_: Throwable) {
+                    0L
+                }
+                if (chatTemplatesPtr != 0L) {
+                    val source = runCatching { LlamaWrapper.nativeChatTemplateSource(chatTemplatesPtr) }.getOrNull()
+                    LogRepository.log(LogLevel.INFO, "Chat template: ${source ?: "unknown"}")
+                } else {
+                    LogRepository.log(LogLevel.WARN, "No chat template found; tool calling is unavailable")
+                }
+
                 _loadedModel.value = ModelInfo(
                     path = modelLabel,
                     name = File(modelLabel).name,
@@ -155,16 +178,15 @@ object LlmInferenceEngine {
             LlamaWrapper.nativeKvCacheClear(ctxPtr)
             nPast = 0
 
-            val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, prompt, true)
+            val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, prompt, true, parseSpecial = true)
             val decodeOk = LlamaWrapper.nativeDecode(ctxPtr, promptTokens, nPast)
             check(decodeOk) { "Failed to decode prompt" }
             nPast += promptTokens.size
 
-            val eosToken = LlamaWrapper.nativeEosToken(modelPtr)
             try {
             repeat(maxTokens) {
                 val nextToken = LlamaWrapper.nativeSample(activeSamplerPtr, ctxPtr)
-                if (nextToken == eosToken) return@withContext
+                if (LlamaWrapper.nativeIsEog(modelPtr, nextToken)) return@withContext
 
                 val piece = LlamaWrapper.nativeTokenToString(modelPtr, nextToken)
                 onToken(piece)
@@ -174,6 +196,110 @@ object LlmInferenceEngine {
                 if (!ok) return@withContext
             }
             } finally {
+                if (activeSamplerPtr != samplerPtr) LlamaWrapper.nativeFreeSampler(activeSamplerPtr)
+            }
+        }
+    }
+
+
+    /**
+     * Chat generation that understands tools.
+     *
+     * The prompt is rendered by llama.cpp from the model's own template, so tool
+     * definitions land in whatever form that model expects, and the reply is parsed back
+     * into structured calls rather than left as `<tool_call>` text in the content.
+     *
+     * [onToken] still sees raw pieces as they arrive. A caller streaming a tool-enabled
+     * request cannot forward them verbatim, because tool-call syntax is only meaningful
+     * once parsed -- it should buffer and use the returned [ChatGeneration].
+     */
+    suspend fun generateChat(
+        messagesJson: String,
+        toolsJson: String?,
+        toolChoice: String?,
+        parallelToolCalls: Boolean,
+        maxTokens: Int,
+        temperature: Float?,
+        topP: Float?,
+        onToken: suspend (String) -> Unit,
+    ): ChatGeneration = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            check(modelPtr != 0L && ctxPtr != 0L) { "No model loaded" }
+            check(chatTemplatesPtr != 0L) { "Model has no chat template" }
+
+            val statePtr = LlamaWrapper.nativeBuildChatPrompt(
+                chatTemplatesPtr,
+                messagesJson,
+                toolsJson,
+                toolChoice,
+                parallelToolCalls,
+                true,
+            )
+            if (statePtr == 0L) error(withNativeDetail("Failed to build chat prompt"))
+
+            val activeSamplerPtr = if (temperature != null || topP != null) {
+                LlamaWrapper.nativeNewSampler(
+                    temperature ?: 0.7f,
+                    topP ?: 0.9f,
+                    System.currentTimeMillis().toInt(),
+                )
+            } else {
+                samplerPtr
+            }
+
+            try {
+                val info = nativeJson.decodeFromString<NativeChatPromptInfo>(
+                    LlamaWrapper.nativeChatPromptInfo(statePtr)
+                )
+                LogRepository.log(
+                    LogLevel.INFO,
+                    "Chat generation started (format ${info.format}, max $maxTokens tokens)",
+                )
+
+                LlamaWrapper.nativeKvCacheClear(ctxPtr)
+                nPast = 0
+
+                val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, info.prompt, true, parseSpecial = true)
+                check(LlamaWrapper.nativeDecode(ctxPtr, promptTokens, nPast)) { "Failed to decode prompt" }
+                nPast += promptTokens.size
+
+                val raw = StringBuilder()
+
+                for (i in 0 until maxTokens) {
+                    val nextToken = LlamaWrapper.nativeSample(activeSamplerPtr, ctxPtr)
+                    if (LlamaWrapper.nativeIsEog(modelPtr, nextToken)) break
+
+                    val piece = LlamaWrapper.nativeTokenToString(modelPtr, nextToken)
+                    raw.append(piece)
+                    onToken(piece)
+
+                    // Templates can declare stop strings beyond the EOS token; without
+                    // honouring them the model runs on past the end of its tool call.
+                    if (info.additionalStops.any { it.isNotEmpty() && raw.endsWith(it) }) break
+
+                    if (!LlamaWrapper.nativeDecode(ctxPtr, intArrayOf(nextToken), nPast)) break
+                    nPast++
+                }
+
+                Log.i(TAG, "chat: generated ${raw.length} chars, parsing")
+                val parsed = runCatching {
+                    nativeJson.decodeFromString<NativeParsedChat>(
+                        LlamaWrapper.nativeParseChatOutput(statePtr, raw.toString(), false)
+                    )
+                }.getOrElse {
+                    // Parsing is best-effort: a model that ignored the tool format still
+                    // produced usable prose, and dropping it would be worse than not
+                    // recognising a call.
+                    NativeParsedChat(content = raw.toString())
+                }
+
+                Log.i(TAG, "chat: ${promptTokens.size} prompt tokens, ${raw.length} chars out, ${parsed.toolCalls.size} tool calls")
+                ChatGeneration(
+                    content = parsed.content.ifEmpty { if (parsed.toolCalls.isEmpty()) raw.toString() else "" },
+                    toolCalls = parsed.toolCalls,
+                )
+            } finally {
+                LlamaWrapper.nativeFreeChatParams(statePtr)
                 if (activeSamplerPtr != samplerPtr) LlamaWrapper.nativeFreeSampler(activeSamplerPtr)
             }
         }
@@ -190,6 +316,7 @@ object LlmInferenceEngine {
     }
 
     private fun releaseNative() {
+        if (chatTemplatesPtr != 0L) { LlamaWrapper.nativeFreeChatTemplates(chatTemplatesPtr); chatTemplatesPtr = 0L }
         if (ctxPtr != 0L) { LlamaWrapper.nativeFreeContext(ctxPtr); ctxPtr = 0L }
         if (samplerPtr != 0L) { LlamaWrapper.nativeFreeSampler(samplerPtr); samplerPtr = 0L }
         if (modelPtr != 0L) { LlamaWrapper.nativeFreeModel(modelPtr); modelPtr = 0L }
