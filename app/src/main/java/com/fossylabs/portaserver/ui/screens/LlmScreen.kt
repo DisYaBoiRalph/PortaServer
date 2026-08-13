@@ -99,6 +99,7 @@ fun LlmScreen(
 ) {
     val serverState by viewModel.serverState.collectAsStateWithLifecycle()
     val loadedModel by viewModel.loadedModel.collectAsStateWithLifecycle()
+    val lastStats by viewModel.lastStats.collectAsStateWithLifecycle()
     val isLoadingModel by viewModel.isLoadingModel.collectAsStateWithLifecycle()
     val deviceSpecs by viewModel.deviceSpecs.collectAsStateWithLifecycle()
     val modelTier by viewModel.modelTier.collectAsStateWithLifecycle()
@@ -321,6 +322,16 @@ fun LlmScreen(
                                 text = "Model: ${it.name}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
+                            )
+                        }
+
+                        lastStats?.let { stats ->
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = stats.summary(),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.outline,
                             )
                         }
 

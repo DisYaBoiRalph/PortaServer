@@ -245,3 +245,28 @@ data class ChatGeneration(
     val content: String,
     val toolCalls: List<NativeToolCall>,
 )
+
+/**
+ * Throughput of the last generation. Prompt and generation are reported separately
+ * because they scale differently: prompt cost grows with conversation length, which is
+ * what agentic clients pay on every step.
+ */
+data class InferenceStats(
+    val promptTokens: Int,
+    val promptMs: Long,
+    val generatedTokens: Int,
+    val generationMs: Long,
+    val reusedPromptTokens: Int = 0,
+) {
+    val promptTokensPerSec: Double
+        get() = if (promptMs > 0) promptTokens * 1000.0 / promptMs else 0.0
+
+    val generatedTokensPerSec: Double
+        get() = if (generationMs > 0) generatedTokens * 1000.0 / generationMs else 0.0
+
+    fun summary(): String = buildString {
+        append("prompt %d tok in %d ms (%.1f tok/s)".format(promptTokens, promptMs, promptTokensPerSec))
+        if (reusedPromptTokens > 0) append(", %d reused".format(reusedPromptTokens))
+        append(" | gen %d tok in %d ms (%.1f tok/s)".format(generatedTokens, generationMs, generatedTokensPerSec))
+    }
+}

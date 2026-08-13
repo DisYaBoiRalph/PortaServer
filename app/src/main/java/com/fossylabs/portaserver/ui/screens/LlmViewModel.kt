@@ -9,6 +9,7 @@ import com.fossylabs.portaserver.llm.DeviceSpecs
 import com.fossylabs.portaserver.llm.DeviceSpecsReader
 import com.fossylabs.portaserver.llm.HealthCheckResult
 import com.fossylabs.portaserver.llm.HuggingFaceFileDto
+import com.fossylabs.portaserver.llm.InferenceStats
 import com.fossylabs.portaserver.llm.LlmInferenceEngine
 import com.fossylabs.portaserver.llm.AllowlistEntry
 import com.fossylabs.portaserver.llm.ModelAllowlistRepository
@@ -84,6 +85,9 @@ class LlmViewModel(application: Application) : AndroidViewModel(application) {
     val serverState: StateFlow<ServerState> = ServerManager.state
 
     val loadedModel: StateFlow<ModelInfo?> = LlmInferenceEngine.loadedModel
+
+    /** Throughput of the last generation, shown so speed is observable rather than guessed at. */
+    val lastStats: StateFlow<InferenceStats?> = LlmInferenceEngine.lastStats
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private val _isPreparingModelLoad = MutableStateFlow(false)

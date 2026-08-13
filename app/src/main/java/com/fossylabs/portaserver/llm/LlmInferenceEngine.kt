@@ -26,6 +26,9 @@ object LlmInferenceEngine {
     private var ctxPtr: Long = 0L
     private var samplerPtr: Long = 0L
     private var chatTemplatesPtr: Long = 0L
+
+    /** Prompt tokens currently held in the KV cache, for prefix reuse across requests. */
+    private var cachedPromptTokens: IntArray = IntArray(0)
     private var nPast: Int = 0
 
     private val _loadedModel = MutableStateFlow<ModelInfo?>(null)
@@ -33,6 +36,10 @@ object LlmInferenceEngine {
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    private val _lastStats = MutableStateFlow<InferenceStats?>(null)
+    /** Throughput of the most recent generation; null until one has run. */
+    val lastStats: StateFlow<InferenceStats?> = _lastStats.asStateFlow()
 
     /**
      * True while a load or generation holds the engine. Callers use this to reject work
@@ -177,6 +184,9 @@ object LlmInferenceEngine {
 
             LlamaWrapper.nativeKvCacheClear(ctxPtr)
             nPast = 0
+            // This path rewrites the cache without recording what it holds, so the chat
+            // path must not reuse a prefix against it afterwards.
+            cachedPromptTokens = IntArray(0)
 
             val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, prompt, true, parseSpecial = true)
             val decodeOk = LlamaWrapper.nativeDecode(ctxPtr, promptTokens, nPast)
@@ -260,13 +270,20 @@ object LlmInferenceEngine {
                     "Chat generation started (format ${info.format}, max $maxTokens tokens)",
                 )
 
-                LlamaWrapper.nativeKvCacheClear(ctxPtr)
-                nPast = 0
-
                 val promptTokens = LlamaWrapper.nativeTokenize(modelPtr, info.prompt, true, parseSpecial = true)
-                check(LlamaWrapper.nativeDecode(ctxPtr, promptTokens, nPast)) { "Failed to decode prompt" }
-                nPast += promptTokens.size
 
+                val promptStart = System.currentTimeMillis()
+                val reused = reusePromptPrefix(promptTokens)
+                if (reused < promptTokens.size) {
+                    val suffix = promptTokens.copyOfRange(reused, promptTokens.size)
+                    check(LlamaWrapper.nativeDecode(ctxPtr, suffix, nPast)) { "Failed to decode prompt" }
+                    nPast += suffix.size
+                }
+                cachedPromptTokens = promptTokens
+                val promptMs = System.currentTimeMillis() - promptStart
+
+                val generationStart = System.currentTimeMillis()
+                var generatedTokens = 0
                 val raw = StringBuilder()
 
                 for (i in 0 until maxTokens) {
@@ -277,6 +294,7 @@ object LlmInferenceEngine {
                     if (LlamaWrapper.nativeIsEog(modelPtr, nextToken)) break
 
                     val piece = LlamaWrapper.nativeTokenToString(modelPtr, nextToken)
+                    generatedTokens++
                     raw.append(piece)
                     onToken(piece)
 
@@ -288,7 +306,16 @@ object LlmInferenceEngine {
                     nPast++
                 }
 
-                Log.i(TAG, "chat: generated ${raw.length} chars, parsing")
+                val stats = InferenceStats(
+                    promptTokens = promptTokens.size,
+                    promptMs = promptMs,
+                    generatedTokens = generatedTokens,
+                    generationMs = System.currentTimeMillis() - generationStart,
+                    reusedPromptTokens = reused,
+                )
+                _lastStats.value = stats
+                LogRepository.log(LogLevel.INFO, stats.summary())
+                Log.i(TAG, "chat: ${stats.summary()}")
                 val parsed = runCatching {
                     nativeJson.decodeFromString<NativeParsedChat>(
                         LlamaWrapper.nativeParseChatOutput(statePtr, raw.toString(), false)
@@ -312,6 +339,31 @@ object LlmInferenceEngine {
         }
     }
 
+    /**
+     * Trims the KV cache to the longest prefix shared with [promptTokens] and returns how
+     * many tokens were kept.
+     *
+     * Generation leaves its own sampled tokens in the cache after the prompt, so the reuse
+     * point can never exceed what was cached last time. One token is always left to decode:
+     * llama_decode needs at least one, and a request identical to the previous one still has
+     * to produce logits for the next position.
+     */
+    private fun reusePromptPrefix(promptTokens: IntArray): Int {
+        val limit = minOf(cachedPromptTokens.size, promptTokens.size, nPast)
+        var common = 0
+        while (common < limit && cachedPromptTokens[common] == promptTokens[common]) common++
+        if (common >= promptTokens.size) common = promptTokens.size - 1
+        if (common < 0) common = 0
+
+        if (common == 0 || !LlamaWrapper.nativeKvTrim(ctxPtr, common)) {
+            LlamaWrapper.nativeKvCacheClear(ctxPtr)
+            nPast = 0
+            return 0
+        }
+        nPast = common
+        return common
+    }
+
     suspend fun unloadModel() {
         withContext(Dispatchers.IO) {
             mutex.withLock {
@@ -323,6 +375,7 @@ object LlmInferenceEngine {
     }
 
     private fun releaseNative() {
+        cachedPromptTokens = IntArray(0)
         if (chatTemplatesPtr != 0L) { LlamaWrapper.nativeFreeChatTemplates(chatTemplatesPtr); chatTemplatesPtr = 0L }
         if (ctxPtr != 0L) { LlamaWrapper.nativeFreeContext(ctxPtr); ctxPtr = 0L }
         if (samplerPtr != 0L) { LlamaWrapper.nativeFreeSampler(samplerPtr); samplerPtr = 0L }

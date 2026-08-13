@@ -38,6 +38,9 @@ object LlamaWrapper {
     // KV cache
     external fun nativeKvCacheClear(ctxPtr: Long)
 
+    /** Drops cached KV from [nKeep] onward, keeping the prefix. False if it could not. */
+    external fun nativeKvTrim(ctxPtr: Long, nKeep: Int): Boolean
+
     // Chat template
     external fun nativeApplyChatTemplate(
         modelPtr: Long,

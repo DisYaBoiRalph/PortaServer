@@ -652,6 +652,24 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeApplyChatTemplate(
 // KV cache management
 // ---------------------------------------------------------------------------
 
+/**
+ * Drops cached keys/values from position [nKeep] onward, keeping the prefix.
+ *
+ * Agent loops resend a growing transcript, so consecutive requests share a long prefix.
+ * Trimming to it and decoding only the new suffix avoids re-processing the whole
+ * conversation on every step.
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeKvTrim(
+        JNIEnv*, jobject, jlong ctxPtr, jint nKeep) {
+    auto* ctx = reinterpret_cast<llama_context*>(ctxPtr);
+    if (ctx == nullptr || nKeep < 0) return JNI_FALSE;
+    llama_memory_t mem = llama_get_memory(ctx);
+    if (mem == nullptr) return JNI_FALSE;
+    // p1 < 0 means "to the end"; seq 0 is the only sequence this bridge uses.
+    return llama_memory_seq_rm(mem, 0, nKeep, -1) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeKvCacheClear(
         JNIEnv*, jobject, jlong ctxPtr) {
