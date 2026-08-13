@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <unordered_map>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -207,6 +208,87 @@ static void append_fd_probe(std::ostringstream& details, int fd) {
     }
 }
 
+/**
+ * Streams opened for llama_model_load_from_file_ptr, keyed by the model they back.
+ *
+ * llama.cpp does not take ownership of such a stream -- llama_file's impl sets
+ * owns_fp = false -- and with mmap the mapping has to outlive the load, so the stream is
+ * held here until the model is freed.
+ */
+static std::mutex g_model_files_mutex;
+static std::unordered_map<llama_model*, FILE*> g_model_files;
+
+static void remember_model_file(llama_model* model, FILE* fp) {
+    std::lock_guard<std::mutex> lock(g_model_files_mutex);
+    g_model_files[model] = fp;
+}
+
+static void close_model_file(llama_model* model) {
+    FILE* fp = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_model_files_mutex);
+        auto it = g_model_files.find(model);
+        if (it != g_model_files.end()) {
+            fp = it->second;
+            g_model_files.erase(it);
+        }
+    }
+    if (fp != nullptr) {
+        std::fclose(fp);
+    }
+}
+
+/**
+ * Loads directly from an already-open descriptor.
+ *
+ * Scoped storage on some vendors (observed on One UI) refuses to reopen a SAF descriptor
+ * through /proc/self/fd, even though reading and mmapping the descriptor itself work
+ * fine. Handing llama.cpp the stream avoids that reopen entirely, and avoids copying the
+ * model into app cache just to give it a path.
+ *
+ * Returns 0 without recording an error when the stream route is unavailable, so the
+ * caller can fall back to the path-based loader and report its richer diagnostics.
+ */
+static jlong load_model_from_stream(int fd, int nGpuLayers) {
+    const int dupFd = dup(fd);
+    if (dupFd < 0) {
+        LOGI("nativeLoadModel[fd]: dup failed: %s", errno_text(errno).c_str());
+        return 0L;
+    }
+
+    FILE* fp = fdopen(dupFd, "rb");
+    if (fp == nullptr) {
+        LOGI("nativeLoadModel[fd]: fdopen failed: %s", errno_text(errno).c_str());
+        close(dupFd);
+        return 0L;
+    }
+
+    llama_model_params params = llama_model_default_params();
+    const bool defaultUseMmap = params.use_mmap;
+    params.n_gpu_layers = nGpuLayers;
+
+    clear_llama_log();
+    llama_model* model = llama_model_load_from_file_ptr(fp, params);
+
+    if (model == nullptr && defaultUseMmap) {
+        // The failed attempt leaves the stream mid-file; rewind before reusing it.
+        LOGI("nativeLoadModel[fd]: stream load failed, retrying with use_mmap=0");
+        std::rewind(fp);
+        params.use_mmap = false;
+        clear_llama_log();
+        model = llama_model_load_from_file_ptr(fp, params);
+    }
+
+    if (model == nullptr) {
+        std::fclose(fp);
+        return 0L;
+    }
+
+    remember_model_file(model, fp);
+    LOGI("nativeLoadModel[fd]: loaded from stream, no cache copy needed");
+    return reinterpret_cast<jlong>(model);
+}
+
 static jlong load_model_with_diagnostics(
         const std::string& source,
         const std::string& path,
@@ -317,6 +399,16 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeLoadModelFromFd(
         return 0L;
     }
 
+    // Preferred route: hand llama.cpp the descriptor we already hold. Reopening it
+    // through /proc/self/fd is denied under some vendors' scoped storage, which used
+    // to force a full copy of the model into app cache.
+    const jlong streamed = load_model_from_stream(fd, nGpuLayers);
+    if (streamed != 0L) {
+        clear_last_error();
+        return streamed;
+    }
+
+    // Fall back to the path form, whose diagnostics explain why both routes failed.
     std::ostringstream fdPath;
     fdPath << "/proc/self/fd/" << fd;
     return load_model_with_diagnostics("fd", fdPath.str(), nCtx, nGpuLayers, fd);
@@ -325,7 +417,10 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeLoadModelFromFd(
 extern "C" JNIEXPORT void JNICALL
 Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeModel(
         JNIEnv*, jobject, jlong modelPtr) {
-    llama_model_free(reinterpret_cast<llama_model*>(modelPtr));
+    auto* model = reinterpret_cast<llama_model*>(modelPtr);
+    llama_model_free(model);
+    // Only after the model is gone: with mmap its mapping is backed by this stream.
+    close_model_file(model);
 }
 
 // ---------------------------------------------------------------------------
