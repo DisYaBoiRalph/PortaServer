@@ -82,7 +82,10 @@ fun Route.llmRoutes() {
         // the calls they asked for.
         val hasTools = !request.tools.isNullOrEmpty()
 
-        val generation: suspend (suspend (String) -> Unit) -> ChatGeneration = { onToken ->
+        val generation: suspend (
+            suspend (String) -> Unit,
+            (suspend (List<NativeChatDelta>) -> Unit)?,
+        ) -> ChatGeneration = { onToken, onDelta ->
             LlmInferenceEngine.generateChat(
                 messagesJson = request.messages.toString(),
                 toolsJson = request.tools?.toString(),
@@ -92,6 +95,7 @@ fun Route.llmRoutes() {
                 temperature = request.temperature ?: InferenceDefaults.temperature,
                 topP = request.topP ?: InferenceDefaults.topP,
                 onToken = onToken,
+                onDelta = onDelta,
             )
         }
 
@@ -110,21 +114,30 @@ fun Route.llmRoutes() {
                 writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(role = "assistant")))}\n\n")
                 flush()
 
-                val result = generation { token ->
-                    if (!hasTools) {
-                        writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(content = token)))}\n\n")
-                        flush()
+                // Without tools the raw pieces are the content and can go out as they
+                // arrive. With tools the reply is re-parsed each token instead, because a
+                // half-written <tool_call> block is not something a client can act on.
+                val result = if (hasTools) {
+                    generation({ }) { deltas ->
+                        for (delta in deltas) {
+                            val toolCalls = delta.toWireDelta()?.let { listOf(it) }
+                            if (delta.content.isEmpty() && toolCalls == null) continue
+                            val piece = CompletionDelta(
+                                content = delta.content.takeIf { it.isNotEmpty() },
+                                toolCalls = toolCalls,
+                            )
+                            writeStringUtf8("data: " + chunk(CompletionChoice(delta = piece)) + "\n\n")
+                            flush()
+                        }
                     }
+                } else {
+                    generation({ token ->
+                        val piece = CompletionDelta(content = token)
+                        writeStringUtf8("data: " + chunk(CompletionChoice(delta = piece)) + "\n\n")
+                        flush()
+                    }, null)
                 }
 
-                if (hasTools && result.content.isNotEmpty()) {
-                    writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(content = result.content)))}\n\n")
-                    flush()
-                }
-                if (result.toolCalls.isNotEmpty()) {
-                    writeStringUtf8("data: ${chunk(CompletionChoice(delta = CompletionDelta(toolCalls = result.toolCalls.toWireCalls())))}\n\n")
-                    flush()
-                }
                 writeStringUtf8(
                     "data: ${chunk(CompletionChoice(finishReason = result.finishReason()))}\n\n"
                 )
@@ -132,7 +145,7 @@ fun Route.llmRoutes() {
                 flush()
             }
         } else {
-            val result = generation { }
+            val result = generation({ }, null)
             call.respondText(
                 apiJson.encodeToString(
                     ChatCompletionResponse(
@@ -288,3 +301,18 @@ private fun List<NativeToolCall>.toWireCalls(): List<ToolCall> = mapIndexed { in
 
 private fun ChatGeneration.finishReason(): String =
     if (toolCalls.isNotEmpty()) "tool_calls" else "stop"
+
+/** Maps one native diff entry to an OpenAI streaming fragment, if it carries a call. */
+private fun NativeChatDelta.toWireDelta(): ToolCallDelta? {
+    val index = toolCallIndex ?: return null
+    return ToolCallDelta(
+        index = index,
+        id = toolCallId?.takeIf { it.isNotEmpty() },
+        // OpenAI sends type and name only on the fragment that opens a call.
+        type = "function".takeIf { !toolCallName.isNullOrEmpty() },
+        function = ToolCallFunctionDelta(
+            name = toolCallName?.takeIf { it.isNotEmpty() },
+            arguments = toolCallArgs?.takeIf { it.isNotEmpty() },
+        ),
+    )
+}

@@ -88,5 +88,11 @@ object LlamaWrapper {
 
     external fun nativeFreeChatSampler(samplerPtr: Long)
 
+    /**
+     * Deltas since the previous call, as JSON:
+     * [{content, toolCallIndex?, toolCallId?, toolCallName?, toolCallArgs?}].
+     */
+    external fun nativeDiffChatOutput(statePtr: Long, text: String, isFinal: Boolean): String
+
     external fun nativeFreeChatParams(statePtr: Long)
 }

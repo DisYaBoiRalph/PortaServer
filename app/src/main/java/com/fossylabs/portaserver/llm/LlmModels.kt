@@ -112,7 +112,7 @@ data class CompletionMessage(
 data class CompletionDelta(
     val role: String? = null,
     val content: String? = null,
-    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
+    @SerialName("tool_calls") val toolCalls: List<ToolCallDelta>? = null,
 )
 
 @Serializable
@@ -270,3 +270,28 @@ data class InferenceStats(
         append(" | gen %d tok in %d ms (%.1f tok/s)".format(generatedTokens, generationMs, generatedTokensPerSec))
     }
 }
+
+/** One incremental step of a streamed reply; see LlamaWrapper.nativeDiffChatOutput. */
+@Serializable
+data class NativeChatDelta(
+    val content: String = "",
+    val toolCallIndex: Int? = null,
+    val toolCallId: String? = null,
+    val toolCallName: String? = null,
+    val toolCallArgs: String? = null,
+)
+
+/** Streaming tool-call fragment in OpenAI shape: index identifies which call it extends. */
+@Serializable
+data class ToolCallDelta(
+    val index: Int,
+    val id: String? = null,
+    val type: String? = null,
+    val function: ToolCallFunctionDelta? = null,
+)
+
+@Serializable
+data class ToolCallFunctionDelta(
+    val name: String? = null,
+    val arguments: String? = null,
+)

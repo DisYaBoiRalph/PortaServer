@@ -232,6 +232,7 @@ object LlmInferenceEngine {
         temperature: Float?,
         topP: Float?,
         onToken: suspend (String) -> Unit,
+        onDelta: (suspend (List<NativeChatDelta>) -> Unit)? = null,
     ): ChatGeneration = withContext(Dispatchers.IO) {
         mutex.withLock {
             check(modelPtr != 0L && ctxPtr != 0L) { "No model loaded" }
@@ -298,12 +299,33 @@ object LlmInferenceEngine {
                     raw.append(piece)
                     onToken(piece)
 
+                    if (onDelta != null) {
+                        // Re-parse the whole reply and emit only what changed. Costly per
+                        // token, but it is the only way partial tool-call syntax becomes
+                        // something a client can act on.
+                        val deltas = runCatching {
+                            nativeJson.decodeFromString<List<NativeChatDelta>>(
+                                LlamaWrapper.nativeDiffChatOutput(statePtr, raw.toString(), false)
+                            )
+                        }.getOrDefault(emptyList())
+                        if (deltas.isNotEmpty()) onDelta(deltas)
+                    }
+
                     // Templates can declare stop strings beyond the EOS token; without
                     // honouring them the model runs on past the end of its tool call.
                     if (info.additionalStops.any { it.isNotEmpty() && raw.endsWith(it) }) break
 
                     if (!LlamaWrapper.nativeDecode(ctxPtr, intArrayOf(nextToken), nPast)) break
                     nPast++
+                }
+
+                if (onDelta != null) {
+                    val tail = runCatching {
+                        nativeJson.decodeFromString<List<NativeChatDelta>>(
+                            LlamaWrapper.nativeDiffChatOutput(statePtr, raw.toString(), true)
+                        )
+                    }.getOrDefault(emptyList())
+                    if (tail.isNotEmpty()) onDelta(tail)
                 }
 
                 val stats = InferenceStats(

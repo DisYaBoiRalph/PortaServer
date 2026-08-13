@@ -728,6 +728,8 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeChatTemplateSource(
 struct ChatRequestState {
     common_chat_params        params;
     common_chat_parser_params parser;
+    /** Last parse emitted while streaming, so deltas can be computed against it. */
+    common_chat_msg           streamed;
 };
 
 static const char* chat_tool_choice_name(common_chat_tool_choice choice) {
@@ -962,4 +964,50 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeChatSampler(
         JNIEnv*, jobject, jlong samplerPtr) {
     if (samplerPtr == 0L) return;
     common_sampler_free(reinterpret_cast<common_sampler*>(samplerPtr));
+}
+
+/**
+ * Incremental view of a streaming reply.
+ *
+ * Streaming cannot forward raw pieces once tools are in play: a half-emitted <tool_call>
+ * block is not something a client can act on. Instead the whole text so far is re-parsed
+ * after each token and diffed against the previous parse, which turns partial output into
+ * the incremental content and tool_call fragments the OpenAI SSE shape expects.
+ *
+ * The previous parse is held natively so the cost stays one parse per token rather than
+ * two, and so partial state does not have to cross JNI.
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeDiffChatOutput(
+        JNIEnv* env, jobject, jlong statePtr, jstring jText, jboolean isFinal) {
+
+    if (statePtr == 0L) return env->NewStringUTF("[]");
+    auto* state = reinterpret_cast<ChatRequestState*>(statePtr);
+
+    const char* textChars = env->GetStringUTFChars(jText, nullptr);
+    std::string text = textChars ? textChars : "";
+    if (textChars) env->ReleaseStringUTFChars(jText, textChars);
+
+    try {
+        common_chat_msg current = common_chat_parse(text, isFinal != JNI_TRUE, state->parser);
+        auto diffs = common_chat_msg_diff::compute_diffs(state->streamed, current);
+        state->streamed = current;
+
+        auto out = nlohmann::ordered_json::array();
+        for (const auto& diff : diffs) {
+            nlohmann::ordered_json entry;
+            entry["content"] = diff.content_delta;
+            if (diff.tool_call_index != std::string::npos) {
+                entry["toolCallIndex"] = (int64_t)diff.tool_call_index;
+                entry["toolCallId"]    = diff.tool_call_delta.id;
+                entry["toolCallName"]  = diff.tool_call_delta.name;
+                entry["toolCallArgs"]  = diff.tool_call_delta.arguments;
+            }
+            out.push_back(entry);
+        }
+        return env->NewStringUTF(out.dump().c_str());
+    } catch (const std::exception&) {
+        // Mid-token text is routinely unparseable; emitting nothing is correct here.
+        return env->NewStringUTF("[]");
+    }
 }
