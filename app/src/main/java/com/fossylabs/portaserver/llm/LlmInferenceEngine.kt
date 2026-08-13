@@ -237,14 +237,18 @@ object LlmInferenceEngine {
             )
             if (statePtr == 0L) error(withNativeDetail("Failed to build chat prompt"))
 
-            val activeSamplerPtr = if (temperature != null || topP != null) {
-                LlamaWrapper.nativeNewSampler(
-                    temperature ?: 0.7f,
-                    topP ?: 0.9f,
-                    System.currentTimeMillis().toInt(),
-                )
-            } else {
-                samplerPtr
+            // Always a per-request sampler here: it carries the grammar derived from this
+            // request's tools, so it cannot be shared with the engine-wide one.
+            val activeSamplerPtr = LlamaWrapper.nativeNewChatSampler(
+                modelPtr,
+                statePtr,
+                temperature ?: 0.7f,
+                topP ?: 0.9f,
+                System.currentTimeMillis().toInt(),
+            )
+            if (activeSamplerPtr == 0L) {
+                LlamaWrapper.nativeFreeChatParams(statePtr)
+                error(withNativeDetail("Failed to create sampler"))
             }
 
             try {
@@ -266,7 +270,10 @@ object LlmInferenceEngine {
                 val raw = StringBuilder()
 
                 for (i in 0 until maxTokens) {
-                    val nextToken = LlamaWrapper.nativeSample(activeSamplerPtr, ctxPtr)
+                    val nextToken = LlamaWrapper.nativeChatSample(activeSamplerPtr, ctxPtr)
+                    // Negative means sampling failed natively rather than finished; stop
+                    // and return what has been generated instead of looping on it.
+                    if (nextToken < 0) break
                     if (LlamaWrapper.nativeIsEog(modelPtr, nextToken)) break
 
                     val piece = LlamaWrapper.nativeTokenToString(modelPtr, nextToken)
@@ -300,7 +307,7 @@ object LlmInferenceEngine {
                 )
             } finally {
                 LlamaWrapper.nativeFreeChatParams(statePtr)
-                if (activeSamplerPtr != samplerPtr) LlamaWrapper.nativeFreeSampler(activeSamplerPtr)
+                LlamaWrapper.nativeFreeChatSampler(activeSamplerPtr)
             }
         }
     }

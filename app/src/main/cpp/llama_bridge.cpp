@@ -16,6 +16,8 @@
 #include <cstring>
 #include "llama.h"
 #include "chat.h"
+#include "common.h"
+#include "sampling.h"
 #include <nlohmann/json.hpp>
 
 #define LOG_TAG "LlamaBridge"
@@ -862,4 +864,84 @@ Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeChatParams(
         JNIEnv*, jobject, jlong statePtr) {
     if (statePtr == 0L) return;
     delete reinterpret_cast<ChatRequestState*>(statePtr);
+}
+
+/**
+ * Sampler for a chat request, constrained by the grammar the chat template produced.
+ *
+ * This delegates to common_sampler rather than assembling a llama_sampler_chain by hand.
+ * A lazy grammar only activates partway through generation, so a token can be chosen
+ * before the grammar is live and then rejected when it is accepted -- llama.cpp aborts
+ * with "Unexpected empty grammar stack" if that happens. common_sampler_sample handles it
+ * by re-sampling with the grammar applied first, which a plain chain does not do.
+ */
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeNewChatSampler(
+        JNIEnv*, jobject, jlong modelPtr, jlong statePtr,
+        jfloat temperature, jfloat topP, jint seed) {
+
+    auto* model = reinterpret_cast<llama_model*>(modelPtr);
+    if (model == nullptr) return 0L;
+
+    common_params_sampling sparams;
+    sparams.temp  = temperature;
+    sparams.top_p = topP;
+    sparams.seed  = (uint32_t)seed;
+
+    if (statePtr != 0L) {
+        auto* state = reinterpret_cast<ChatRequestState*>(statePtr);
+        if (!state->params.grammar.empty()) {
+            sparams.grammar          = common_grammar(COMMON_GRAMMAR_TYPE_TOOL_CALLS,
+                                                      state->params.grammar);
+            sparams.grammar_lazy     = state->params.grammar_lazy;
+            sparams.grammar_triggers = state->params.grammar_triggers;
+            LOGI("nativeNewChatSampler: grammar active (lazy=%d, %zu triggers)",
+                 (int)state->params.grammar_lazy, state->params.grammar_triggers.size());
+        }
+    }
+
+    try {
+        common_sampler* sampler = common_sampler_init(model, sparams);
+        if (sampler == nullptr) {
+            set_last_error("common_sampler_init returned null");
+            return 0L;
+        }
+        return reinterpret_cast<jlong>(sampler);
+    } catch (const std::exception& e) {
+        set_last_error(std::string("common_sampler_init failed: ") + e.what());
+        return 0L;
+    }
+}
+
+/**
+ * Samples one token and accepts it into the grammar.
+ *
+ * Exceptions are contained here: llama.cpp throws on some grammar states, and letting
+ * that unwind through JNI aborts the process rather than failing the request. Returning
+ * a negative token lets the caller stop generation and answer with what it has.
+ */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeChatSample(
+        JNIEnv*, jobject, jlong samplerPtr, jlong ctxPtr) {
+
+    auto* sampler = reinterpret_cast<common_sampler*>(samplerPtr);
+    auto* ctx = reinterpret_cast<llama_context*>(ctxPtr);
+    if (sampler == nullptr || ctx == nullptr) return -1;
+
+    try {
+        const llama_token token = common_sampler_sample(sampler, ctx, -1);
+        common_sampler_accept(sampler, token, /* accept_grammar = */ true);
+        return (jint)token;
+    } catch (const std::exception& e) {
+        set_last_error(std::string("sampling failed: ") + e.what());
+        LOGE("nativeChatSample: %s", e.what());
+        return -1;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fossylabs_portaserver_llm_LlamaWrapper_nativeFreeChatSampler(
+        JNIEnv*, jobject, jlong samplerPtr) {
+    if (samplerPtr == 0L) return;
+    common_sampler_free(reinterpret_cast<common_sampler*>(samplerPtr));
 }

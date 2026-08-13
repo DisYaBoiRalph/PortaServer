@@ -68,5 +68,22 @@ object LlamaWrapper {
     /** JSON: content, reasoningContent, toolCalls[{id, name, arguments}]. */
     external fun nativeParseChatOutput(statePtr: Long, text: String, isPartial: Boolean): String
 
+    /**
+     * Sampler for a chat request, constrained by the grammar the template produced so a
+     * malformed tool call cannot be emitted. Plain sampling when there is no grammar.
+     */
+    external fun nativeNewChatSampler(
+        modelPtr: Long,
+        statePtr: Long,
+        temperature: Float,
+        topP: Float,
+        seed: Int,
+    ): Long
+
+    /** Samples and accepts one token. Returns a negative value if sampling failed. */
+    external fun nativeChatSample(samplerPtr: Long, ctxPtr: Long): Int
+
+    external fun nativeFreeChatSampler(samplerPtr: Long)
+
     external fun nativeFreeChatParams(statePtr: Long)
 }
