@@ -3,6 +3,14 @@ project("portaserver")
 
 include(FetchContent)
 
+# AGP compiles the debug variant with CMAKE_BUILD_TYPE=Debug, which means -O0 for the
+# tensor kernels. Measured on a Snapdragon 8 Gen 3, that made a 53-token prompt take 21
+# seconds to decode; optimised, the same work is trivial. Debug symbols are unaffected,
+# so native crashes still resolve -- only the optimisation level changes.
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-O3)
+endif()
+
 # Disable llama.cpp extras that are not needed on Android
 set(GGML_METAL     OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA      OFF CACHE BOOL "" FORCE)
