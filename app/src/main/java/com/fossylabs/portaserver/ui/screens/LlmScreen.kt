@@ -562,7 +562,7 @@ fun LlmScreen(
                 )
             }
 
-            item { Spacer(Modifier.height(16.dp)) }
+            item { Spacer(Modifier.height(88.dp)) }
         }
     }
 
